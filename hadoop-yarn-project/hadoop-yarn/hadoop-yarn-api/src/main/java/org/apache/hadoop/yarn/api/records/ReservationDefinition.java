@@ -44,7 +44,7 @@ public abstract class ReservationDefinition {
     rDefinition.setDeadline(deadline);
     rDefinition.setReservationRequests(reservationRequests);
     rDefinition.setReservationName(name);
-    rDefinition.setPeriodicity(period);	
+    rDefinition.setPeriodicity(period);
     return rDefinition;
   }
 
@@ -145,9 +145,9 @@ public abstract class ReservationDefinition {
   public abstract void setReservationName(String name);
 
   /**
-   * Get the periodicity of this reservation representing the time period of 
+   * Get the periodicity of this reservation representing the time period of
    * the periodic job.
-   * 
+   *
    * @return periodicity of this reservation
    */
   @Public
@@ -155,9 +155,9 @@ public abstract class ReservationDefinition {
   public abstract long getPeriodicity();
 
   /**
-   * Set the periodicity of this reservation representing the time period of 
+   * Set the periodicity of this reservation representing the time period of
    * the periodic job.
-   * 
+   *
    * @param period periodicity of this reservation
    */
   @Public
