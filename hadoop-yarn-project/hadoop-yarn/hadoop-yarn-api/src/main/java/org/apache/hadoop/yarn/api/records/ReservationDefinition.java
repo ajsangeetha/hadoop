@@ -37,13 +37,23 @@ public abstract class ReservationDefinition {
   @Public
   @Unstable
   public static ReservationDefinition newInstance(long arrival, long deadline,
-      ReservationRequests reservationRequests, String name) {
+      ReservationRequests reservationRequests, String name, long period) {
     ReservationDefinition rDefinition =
         Records.newRecord(ReservationDefinition.class);
     rDefinition.setArrival(arrival);
     rDefinition.setDeadline(deadline);
     rDefinition.setReservationRequests(reservationRequests);
     rDefinition.setReservationName(name);
+    rDefinition.setPeriodicity(period);	
+    return rDefinition;
+  }
+
+  @Public
+  @Unstable
+  public static ReservationDefinition newInstance(long arrival, long deadline,
+      ReservationRequests reservationRequests, String name) {
+    ReservationDefinition rDefinition =
+        newInstance(arrival, deadline, reservationRequests, name, 0);
     return rDefinition;
   }
 
@@ -133,5 +143,25 @@ public abstract class ReservationDefinition {
   @Public
   @Evolving
   public abstract void setReservationName(String name);
+
+  /**
+   * Get the periodicity of this reservation representing the time period of 
+   * the periodic job.
+   * 
+   * @return periodicity of this reservation
+   */
+  @Public
+  @Evolving
+  public abstract long getPeriodicity();
+
+  /**
+   * Set the periodicity of this reservation representing the time period of 
+   * the periodic job.
+   * 
+   * @param period periodicity of this reservation
+   */
+  @Public
+  @Evolving
+  public abstract void setPeriodicity(long period);
 
 }

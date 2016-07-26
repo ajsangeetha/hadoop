@@ -181,4 +181,20 @@ public class ReservationDefinitionPBImpl extends ReservationDefinition {
     return false;
   }
 
+  @Override
+  public long getPeriodicity() {
+    ReservationDefinitionProtoOrBuilder p = viaProto ? proto : builder;
+    if (p.hasPeriod()) {
+      long period = p.getPeriod();
+      return period;
+    } else {
+      return 0L;
+    }
+  }
+
+  @Override
+  public void setPeriodicity(long period) {
+    builder.setPeriod(period);
+  }
+
 }
