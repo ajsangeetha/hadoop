@@ -162,8 +162,8 @@ public class ReservationDefinitionPBImpl extends ReservationDefinition {
   @Override
   public String toString() {
     return "{Arrival: " + getArrival() + ", Deadline: " + getDeadline()
-        + ", Reservation Name: " + getReservationName() + ", Resources: "
-        + getReservationRequests() + "}";
+        + ", Reservation Name: " + getReservationName() + ", Period: "
+        + getPeriodicity() + ", Resources: " + getReservationRequests() + "}";
   }
 
   @Override

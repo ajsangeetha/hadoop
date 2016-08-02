@@ -146,7 +146,12 @@ public abstract class ReservationDefinition {
 
   /**
    * Get the periodicity of this reservation representing the time period of
-   * the periodic job.
+   * the periodic job. Period is represented in milliseconds for periodic jobs. 
+   * Period is 0 for non-periodic jobs. Periodic jobs are valid until they are
+   * explicitly cancelled and have higher priority than non-periodic jobs
+   * (during initial placement and replanning). Periodic job allocations are
+   * consistent across runs (flexibility in allocation is leveraged only during
+   * initial placement, allocations remain consistent thereafter).
    *
    * @return periodicity of this reservation
    */
@@ -156,7 +161,12 @@ public abstract class ReservationDefinition {
 
   /**
    * Set the periodicity of this reservation representing the time period of
-   * the periodic job.
+   * the periodic job. Period is represented in milliseconds for periodic jobs. 
+   * Period is 0 for non-periodic jobs. Periodic jobs are valid until they are
+   * explicitly cancelled and have higher priority than non-periodic jobs
+   * (during initial placement and replanning). Periodic job allocations are
+   * consistent across runs (flexibility in allocation is leveraged only during
+   * initial placement, allocations remain consistent thereafter).
    *
    * @param period periodicity of this reservation
    */
