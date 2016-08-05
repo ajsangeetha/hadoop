@@ -571,5 +571,27 @@ public class TestRLESparseResourceAllocation {
     }
     return req;
   }
+  
+  @Test
+  public void testMaxPeriodicCapacity() {
+    ResourceCalculator resCalc = new DefaultResourceCalculator();
+
+    RLESparseResourceAllocation rleSparseVector =
+        new RLESparseResourceAllocation(resCalc);
+    int[] alloc = { 2, 5, 7, 10, 3, 4, 6, 8};
+    int start = 0;
+    Set<Entry<ReservationInterval, Resource>> inputs =
+        generateAllocation(start, alloc, true).entrySet();
+    for (Entry<ReservationInterval, Resource> ip : inputs) {
+      rleSparseVector.addInterval(ip.getKey(), ip.getValue());
+    }
+    LOG.info(rleSparseVector.toString());
+    Assert.assertEquals(rleSparseVector.getMaxPeriodicCapacity(0,1),10);
+    Assert.assertEquals(rleSparseVector.getMaxPeriodicCapacity(0,2),7);
+    Assert.assertEquals(rleSparseVector.getMaxPeriodicCapacity(0,3),10);
+    Assert.assertEquals(rleSparseVector.getMaxPeriodicCapacity(0,4),3);
+    Assert.assertEquals(rleSparseVector.getMaxPeriodicCapacity(0,5),4);
+
+  }
 
 }
