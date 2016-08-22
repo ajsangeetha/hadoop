@@ -53,7 +53,7 @@ public abstract class ReservationDefinition {
   public static ReservationDefinition newInstance(long arrival, long deadline,
       ReservationRequests reservationRequests, String name) {
     ReservationDefinition rDefinition =
-        newInstance(arrival, deadline, reservationRequests, name, 0);
+        newInstance(arrival, deadline, reservationRequests, name, "0");
     return rDefinition;
   }
 
