@@ -155,6 +155,13 @@ public class ReservationInputValidator {
           "validate reservation input definition", "ClientRMService", message);
       throw RPCUtil.getRemoteException(message);
     }
+    // check that hte period is a positive long value (all characters are
+    // numbers)
+    String period = contract.getPeriodicity();
+    if (!period.matches("\\d+")) {
+      message = "Period " + period + " is not a valid long value. Please try "
+          + "again with a non-negative long value as period";
+    }
   }
 
   private Plan getPlanFromQueue(ReservationSystem reservationSystem, String

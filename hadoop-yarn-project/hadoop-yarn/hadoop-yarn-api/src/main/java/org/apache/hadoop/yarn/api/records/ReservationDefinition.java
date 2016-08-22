@@ -37,7 +37,7 @@ public abstract class ReservationDefinition {
   @Public
   @Unstable
   public static ReservationDefinition newInstance(long arrival, long deadline,
-      ReservationRequests reservationRequests, String name, long period) {
+      ReservationRequests reservationRequests, String name, String period) {
     ReservationDefinition rDefinition =
         Records.newRecord(ReservationDefinition.class);
     rDefinition.setArrival(arrival);
@@ -146,7 +146,10 @@ public abstract class ReservationDefinition {
 
   /**
    * Get the periodicity of this reservation representing the time period of
-   * the periodic job. Period is represented in milliseconds for periodic jobs.
+   * the periodic job. Currently, only long values are returned. Later,
+   * support for regular expressions denoting arbitrary recurrence patterns
+   * (e.g., every Tuesday and Thursday) will be added.
+   * Period is represented in milliseconds for periodic jobs.
    * Period is 0 for non-periodic jobs. Periodic jobs are valid until they are
    * explicitly cancelled and have higher priority than non-periodic jobs
    * (during initial placement and replanning). Periodic job allocations are
@@ -157,11 +160,14 @@ public abstract class ReservationDefinition {
    */
   @Public
   @Evolving
-  public abstract long getPeriodicity();
+  public abstract String getPeriodicity();
 
   /**
    * Set the periodicity of this reservation representing the time period of
-   * the periodic job. Period is represented in milliseconds for periodic jobs.
+   * the periodic job. Currently, only long values are supported. Later,
+   * support for regular expressions denoting arbitrary recurrence patterns
+   * (e.g., every Tuesday and Thursday) will be added.
+   * Period is represented in milliseconds for periodic jobs.
    * Period is 0 for non-periodic jobs. Periodic jobs are valid until they are
    * explicitly cancelled and have higher priority than non-periodic jobs
    * (during initial placement and replanning). Periodic job allocations are
@@ -172,6 +178,6 @@ public abstract class ReservationDefinition {
    */
   @Public
   @Evolving
-  public abstract void setPeriodicity(long period);
+  public abstract void setPeriodicity(String period);
 
 }
