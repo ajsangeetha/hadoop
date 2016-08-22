@@ -569,6 +569,15 @@ int create_validate_dir(const char* npath, mode_t perm, const char* path,
       if (check_dir(npath, sb.st_mode, perm, finalComponent) == -1) {
         return -1;
       }
+    } else {
+      // Explicitly set permission after creating the directory in case
+      // umask has been set to a restrictive value, i.e., 0077.
+      if (chmod(npath, perm) != 0) {
+        int permInt = perm & (S_IRWXU | S_IRWXG | S_IRWXO);
+        fprintf(LOGFILE, "Can't chmod %s to the required permission %o - %s\n",
+                npath, permInt, strerror(errno));
+        return -1;
+      }
     }
   } else {
     if (check_dir(npath, sb.st_mode, perm, finalComponent) == -1) {
@@ -599,7 +608,7 @@ int check_dir(const char* npath, mode_t st_mode, mode_t desired, int finalCompon
  * Function to prepare the container directories.
  * It creates the container work and log directories.
  */
-static int create_container_directories(const char* user, const char *app_id,
+int create_container_directories(const char* user, const char *app_id,
     const char *container_id, char* const* local_dir, char* const* log_dir, const char *work_dir) {
   // create dirs as 0750
   const mode_t perms = S_IRWXU | S_IRGRP | S_IXGRP;
@@ -800,7 +809,23 @@ int set_user(const char *user) {
  */
 static int change_owner(const char* path, uid_t user, gid_t group) {
   if (geteuid() == user && getegid() == group) {
+
+  /*
+   * On the BSDs, this is not a guaranteed shortcut
+   * since group permissions are inherited
+   */
+
+#if defined(__FreeBSD__) || defined(__NetBSD__)
+    if (chown(path, user, group) != 0) {
+      fprintf(LOGFILE, "Can't chown %s to %d:%d - %s\n", path, user, group,
+              strerror(errno));
+      return -1;
+    }
     return 0;
+#else
+    return 0;
+#endif
+
   } else {
     uid_t old_user = geteuid();
     gid_t old_group = getegid();
@@ -838,13 +863,13 @@ int create_directory_for_user(const char* path) {
   if (ret == 0) {
     if (0 == mkdir(path, permissions) || EEXIST == errno) {
       // need to reassert the group sticky bit
-      if (chmod(path, permissions) != 0) {
-        fprintf(LOGFILE, "Can't chmod %s to add the sticky bit - %s\n",
-                path, strerror(errno));
-        ret = -1;
-      } else if (change_owner(path, user, nm_gid) != 0) {
+      if (change_owner(path, user, nm_gid) != 0) {
         fprintf(LOGFILE, "Failed to chown %s to %d:%d: %s\n", path, user, nm_gid,
             strerror(errno));
+        ret = -1;
+      } else if (chmod(path, permissions) != 0) {
+        fprintf(LOGFILE, "Can't chmod %s to add the sticky bit - %s\n",
+                path, strerror(errno));
         ret = -1;
       }
     } else {

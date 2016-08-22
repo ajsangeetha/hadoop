@@ -20,36 +20,22 @@
 
 package org.apache.hadoop.yarn.server.nodemanager.containermanager.linux.runtime.docker;
 
-import static org.junit.Assert.*;
-import org.junit.Before;
-import org.junit.Test;
-
 /**
- * Tests the docker stop command and its command
+ * Encapsulates the docker inspect command and its command
  * line arguments.
  */
-public class DockerStopCommandTest {
+public class DockerInspectCommand extends DockerCommand {
+  private static final String INSPECT_COMMAND = "inspect";
+  private String containerName;
 
-  private DockerStopCommand dockerStopCommand;
-
-  private static final int GRACE_PERIOD = 10;
-  private static final String CONTAINER_NAME = "foo";
-
-  @Before
-  public void setup() {
-    dockerStopCommand = new DockerStopCommand(CONTAINER_NAME);
+  public DockerInspectCommand(String containerName) {
+    super(INSPECT_COMMAND);
+    this.containerName = containerName;
   }
 
-  @Test
-  public void testGetCommandOption() {
-    assertEquals("stop", dockerStopCommand.getCommandOption());
-  }
-
-  @Test
-  public void testSetGracePeriod() throws Exception {
-    dockerStopCommand.setGracePeriod(GRACE_PERIOD);
-    assertEquals("stop foo --time=10",
-        dockerStopCommand.getCommandWithArguments());
-
+  public DockerInspectCommand getContainerStatus() {
+    super.addCommandArguments("--format='{{.State.Status}}'");
+    super.addCommandArguments(containerName);
+    return this;
   }
 }

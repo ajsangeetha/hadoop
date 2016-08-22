@@ -2586,6 +2586,24 @@
   </property>
 
   <property>
+    <description>
+    Timeout in seconds for YARN node graceful decommission.
+    This is the maximal time to wait for running containers and applications to complete
+    before transition a DECOMMISSIONING node into DECOMMISSIONED.
+    </description>
+    <name>yarn.resourcemanager.nodemanager-graceful-decommission-timeout-secs</name>
+    <value>3600</value>
+  </property>
+
+  <property>
+    <description>
+    Timeout in seconds of DecommissioningNodesWatcher internal polling.
+    </description>
+    <name>yarn.resourcemanager.decommissioning-nodes-watcher.poll-interval-secs</name>
+    <value>20</value>
+  </property>
+
+  <property>
     <description>The Node Label script to run. Script output Line starting with
      "NODE_PARTITION:" will be considered as Node Label Partition. In case of
      multiple lines have this pattern, then last one will be considered
@@ -2761,72 +2779,76 @@
 
   <property>
     <description>
-    Minimum memory (in MB) used for allocating a container through distributed
-    scheduling.
+      Setting that controls whether opportunistic container allocation
+      is enabled.
     </description>
-    <name>yarn.distributed-scheduling.min-container-memory-mb</name>
+    <name>yarn.opportunistic-container-allocation.enabled</name>
+    <value>false</value>
+  </property>
+
+  <property>
+    <description>
+      Minimum memory (in MB) used for allocating an opportunistic container.
+    </description>
+    <name>yarn.opportunistic-containers.min-memory-mb</name>
     <value>512</value>
   </property>
 
   <property>
     <description>
-    Minimum virtual CPU cores used for allocating a container through
-    distributed scheduling.
+      Minimum virtual CPU cores used for allocating an opportunistic container.
     </description>
-    <name>yarn.distributed-scheduling.min-container-vcores</name>
+    <name>yarn.opportunistic-containers.min-vcores</name>
     <value>1</value>
   </property>
 
   <property>
     <description>
-    Maximum memory (in MB) used for allocating a container through distributed
-    scheduling.
+    Maximum memory (in MB) used for allocating an opportunistic container.
     </description>
-    <name>yarn.distributed-scheduling.max-container-memory-mb</name>
+    <name>yarn.opportunistic-containers.max-memory-mb</name>
     <value>2048</value>
   </property>
 
   <property>
     <description>
-    Maximum virtual CPU cores used for allocating a container through
-    distributed scheduling.
+    Maximum virtual CPU cores used for allocating an opportunistic container.
     </description>
-    <name>yarn.distributed-scheduling.max-container-vcores</name>
+    <name>yarn.opportunistic-containers.max-vcores</name>
     <value>4</value>
   </property>
 
   <property>
     <description>
-    Incremental memory (in MB) used for allocating a container through
-    distributed scheduling.
+    Incremental memory (in MB) used for allocating an opportunistic container.
     </description>
-    <name>yarn.distributed-scheduling.incr-container-memory-mb</name>
+    <name>yarn.opportunistic-containers.incr-memory-mb</name>
     <value>512</value>
   </property>
 
   <property>
     <description>
-    Incremental virtual CPU cores used for allocating a container through
-    distributed scheduling.
+    Incremental virtual CPU cores used for allocating an opportunistic
+      container.
     </description>
-    <name>yarn.distributed-scheduling.incr-vcores</name>
+    <name>yarn.opportunistic-containers.incr-vcores</name>
     <value>1</value>
   </property>
 
   <property>
     <description>
-    Container token expiry for container allocated via distributed scheduling.
+    Container token expiry for opportunistic containers.
     </description>
-    <name>yarn.distributed-scheduling.container-token-expiry-ms</name>
+    <name>yarn.opportunistic-containers.container-token-expiry-ms</name>
     <value>600000</value>
   </property>
 
   <property>
     <description>
-    Number of nodes to be used by the LocalScheduler of a NodeManager for
-    dispatching containers during distributed scheduling.
+    Number of nodes to be used by the Opportunistic Container Allocator for
+    dispatching containers during container allocation.
     </description>
-    <name>yarn.distributed-scheduling.nodes-used</name>
+    <name>yarn.opportunistic-container-allocation.nodes-used</name>
     <value>10</value>
   </property>
 
@@ -2971,6 +2993,14 @@
 
   <property>
     <description>
+      The name of disk validator.
+    </description>
+    <name>yarn.nodemanager.disk-validator</name>
+    <value>basic</value>
+  </property>
+
+  <property>
+  <description>
       Enable the CSRF filter for the timeline service web app
     </description>
     <name>yarn.timeline-service.webapp.rest-csrf.enabled</name>
