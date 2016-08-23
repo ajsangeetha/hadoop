@@ -151,7 +151,7 @@ public abstract class ReservationDefinition {
    * support for regular expressions denoting arbitrary recurrence patterns
    * (e.g., every Tuesday and Thursday) will be added.
    * Recurrence is represented in milliseconds for periodic jobs.
-   * Recurrence is 0 for non-periodic jobs. Periodic jobs are valid until they 
+   * Recurrence is 0 for non-periodic jobs. Periodic jobs are valid until they
    * are explicitly cancelled and have higher priority than non-periodic jobs
    * (during initial placement and replanning). Periodic job allocations are
    * consistent across runs (flexibility in allocation is leveraged only during
