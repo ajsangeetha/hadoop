@@ -155,8 +155,7 @@ public class ReservationInputValidator {
           "validate reservation input definition", "ClientRMService", message);
       throw RPCUtil.getRemoteException(message);
     }
-    // check that hte period is a positive long value (all characters are
-    // numbers)
+    // check that the recurrence is a positive long value.
     String recurrenceExpression = contract.getRecurrenceExpression();
     try {
       Long recurrence = Long.parseLong(recurrenceExpression);
