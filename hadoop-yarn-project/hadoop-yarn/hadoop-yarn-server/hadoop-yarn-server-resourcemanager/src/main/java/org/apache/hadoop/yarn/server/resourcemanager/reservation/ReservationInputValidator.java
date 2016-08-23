@@ -157,10 +157,18 @@ public class ReservationInputValidator {
     }
     // check that hte period is a positive long value (all characters are
     // numbers)
-    String period = contract.getPeriodicity();
-    if (!period.matches("\\d+")) {
-      message = "Period " + period + " is not a valid long value. Please try "
-          + "again with a non-negative long value as period";
+    String recurrenceExpression = contract.getRecurrenceExpression();
+    try {
+      Long recurrence = Long.parseLong(recurrenceExpression);
+      if (recurrence < 0) {
+        message = "Negative Period : " + recurrenceExpression + ". Please try"
+            + " again with a non-negative long value as period";
+        throw RPCUtil.getRemoteException(message);
+      }
+    } catch (NumberFormatException e) {
+      message = "Invalid period " + recurrenceExpression + ". Please try"
+          + " again with a non-negative long value as period";
+      throw RPCUtil.getRemoteException(message);
     }
   }
 
