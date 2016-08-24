@@ -273,7 +273,7 @@ public class TestReservationInputValidator {
   public void testSubmitReservationValidRecurrenceExpression() {
     ReservationSubmissionRequest request =
         createSimpleReservationSubmissionRequest(1, 1, 1, 5, 3, "600000");
-    Plan plan = null;
+    plan = null;
     try {
       plan =
           rrValidator.validateReservationSubmissionRequest(rSystem, request,
@@ -288,7 +288,7 @@ public class TestReservationInputValidator {
   public void testSubmitReservationNegativeRecurrenceExpression() {
     ReservationSubmissionRequest request =
         createSimpleReservationSubmissionRequest(1, 1, 1, 5, 3, "-1234");
-    Plan plan = null;
+    plan = null;
     try {
       plan =
           rrValidator.validateReservationSubmissionRequest(rSystem, request,
@@ -307,7 +307,7 @@ public class TestReservationInputValidator {
   public void testSubmitReservationInvalidRecurrenceExpression() {
     ReservationSubmissionRequest request =
         createSimpleReservationSubmissionRequest(1, 1, 1, 5, 3, "123abc");
-    Plan plan = null;
+    plan = null;
     try {
       plan =
           rrValidator.validateReservationSubmissionRequest(rSystem, request,
