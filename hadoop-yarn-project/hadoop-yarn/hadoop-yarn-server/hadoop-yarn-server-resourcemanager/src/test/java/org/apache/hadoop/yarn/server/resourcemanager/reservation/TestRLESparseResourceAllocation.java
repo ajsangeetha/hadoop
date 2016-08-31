@@ -538,19 +538,19 @@ public class TestRLESparseResourceAllocation {
     }
     LOG.info(rleSparseVector.toString());
     Assert.assertEquals(
-        rleSparseVector.getMaxPeriodicCapacity(0, 1), 
+        rleSparseVector.getMaxPeriodicCapacity(0, 1),
         Resource.newInstance(10, 10));
     Assert.assertEquals(
-        rleSparseVector.getMaxPeriodicCapacity(0, 2), 
+        rleSparseVector.getMaxPeriodicCapacity(0, 2),
         Resource.newInstance(7, 7));
     Assert.assertEquals(
-        rleSparseVector.getMaxPeriodicCapacity(0, 3), 
+        rleSparseVector.getMaxPeriodicCapacity(0, 3),
         Resource.newInstance(10, 10));
     Assert.assertEquals(
-        rleSparseVector.getMaxPeriodicCapacity(0, 4), 
+        rleSparseVector.getMaxPeriodicCapacity(0, 4),
         Resource.newInstance(3, 3));
     Assert.assertEquals(
-        rleSparseVector.getMaxPeriodicCapacity(0, 5), 
+        rleSparseVector.getMaxPeriodicCapacity(0, 5),
         Resource.newInstance(4, 4));
   }
 

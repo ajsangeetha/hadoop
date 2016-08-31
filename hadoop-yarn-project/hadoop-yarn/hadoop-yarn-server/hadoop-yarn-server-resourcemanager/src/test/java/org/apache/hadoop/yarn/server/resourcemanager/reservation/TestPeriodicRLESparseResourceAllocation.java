@@ -83,7 +83,7 @@ public class TestPeriodicRLESparseResourceAllocation {
   }
 
 
-  RLESparseResourceAllocation generateAllocations(int[] alloc, 
+  RLESparseResourceAllocation generateAllocations(int[] alloc,
                                                   long[] timeSteps) {
     TreeMap<Long, Resource> allocationsMap = new TreeMap<>();
     for (int i = 0; i < alloc.length; i++) {
@@ -91,9 +91,8 @@ public class TestPeriodicRLESparseResourceAllocation {
                          Resource.newInstance(alloc[i], alloc[i]));
     }
     RLESparseResourceAllocation rleVector =
-        new RLESparseResourceAllocation(allocationsMap, 
+        new RLESparseResourceAllocation(allocationsMap,
                                         new DefaultResourceCalculator());
     return rleVector;
-  } 
-  
+  }
 }
