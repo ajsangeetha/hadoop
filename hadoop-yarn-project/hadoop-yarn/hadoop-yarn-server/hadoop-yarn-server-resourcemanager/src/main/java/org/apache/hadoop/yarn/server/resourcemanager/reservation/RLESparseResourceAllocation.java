@@ -547,7 +547,6 @@ public class RLESparseResourceAllocation {
       Long lastKey = cumulativeCapacity.lastKey();
       NavigableMap<Long, Resource> validRange =
           cumulativeCapacity.tailMap(tick, true);
-
       for (long t = tick; t <= lastKey; t = t + period) {
         maxCapacity = Resources.componentwiseMax(maxCapacity,
             cumulativeCapacity.floorEntry(t).getValue());

@@ -22,6 +22,7 @@ import org.apache.hadoop.yarn.api.records.Resource;
 
 /**
  * This data structure stores a periodic RLESparseResourceAllocation.
+ * Default period is 1 day (86400000ms).
  */
 
 public class PeriodicRLESparseResourceAllocation {
@@ -52,7 +53,8 @@ public class PeriodicRLESparseResourceAllocation {
   }
 
   /**
-   * Add resource for the specified interval.
+   * Add resource for the specified interval. This function will be used by
+   * {@link InMemoryPlan} while placing reservations between 0 and timePeriod.
    *
    * @param interval {@link ReservationInterval} to which the specified
    *          resource is to be added.
@@ -93,9 +95,12 @@ public class PeriodicRLESparseResourceAllocation {
   public Resource getMaxPeriodicCapacity(long tick, long period) {
     Resource maxResource;
     if (period < timePeriod) {
-      maxResource = rleVector.getMaxPeriodicCapacity(tick % period, period);
+      maxResource = rleVector.getMaxPeriodicCapacity(
+          tick % timePeriod, period);
     } else {
-      maxResource = rleVector.getCapacityAtTime(tick % period);
+      // if period is greater than the length of PeriodicRLESparseAllocation,
+      // only a single value exists in this interval.
+      maxResource = rleVector.getCapacityAtTime(tick % timePeriod);
     }
     return maxResource;
   }

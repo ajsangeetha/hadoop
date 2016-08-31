@@ -1,3 +1,20 @@
+/*******************************************************************************
+ *   Licensed to the Apache Software Foundation (ASF) under one
+ *   or more contributor license agreements.  See the NOTICE file
+ *   distributed with this work for additional information
+ *   regarding copyright ownership.  The ASF licenses this file
+ *   to you under the Apache License, Version 2.0 (the
+ *   "License"); you may not use this file except in compliance
+ *   with the License.  You may obtain a copy of the License at
+ *
+ *       http://www.apache.org/licenses/LICENSE-2.0
+ *
+ *   Unless required by applicable law or agreed to in writing, software
+ *   distributed under the License is distributed on an "AS IS" BASIS,
+ *   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ *   See the License for the specific language governing permissions and
+ *   limitations under the License.
+ *******************************************************************************/
 package org.apache.hadoop.yarn.server.resourcemanager.reservation;
 
 import static org.junit.Assert.assertEquals;
@@ -6,6 +23,7 @@ import static org.junit.Assert.fail;
 
 import java.util.Set;
 import java.util.Map.Entry;
+import java.util.TreeMap;
 
 import org.apache.hadoop.yarn.api.records.Resource;
 import org.apache.hadoop.yarn.util.resource.DefaultResourceCalculator;
@@ -19,42 +37,63 @@ import org.slf4j.LoggerFactory;
 public class TestPeriodicRLESparseResourceAllocation {
 
   private static final Logger LOG = LoggerFactory
-      .getLogger(TestRLESparseResourceAllocation.class);
+      .getLogger(TestPeriodicRLESparseResourceAllocation.class);
   
-/*  @Test
-  public void testBlocks() {
-    ResourceCalculator resCalc = new DefaultResourceCalculator();
-
+  @Test
+  public void testPeriodicCapacity() {
+    int[] alloc = { 10, 7, 5, 2, 0};
+    long[] timeSteps = {0L, 5L, 10L, 15L, 19L};
     RLESparseResourceAllocation rleSparseVector =
-        new RLESparseResourceAllocation(resCalc);
-    int[] alloc = { 10, 10, 10, 10, 10, 10 };
-    int start = 100;
-    Set<Entry<ReservationInterval, Resource>> inputs =
-        generateAllocation(start, alloc, false).entrySet();
-    for (Entry<ReservationInterval, Resource> ip : inputs) {
-      rleSparseVector.addInterval(ip.getKey(), ip.getValue());
-    }
-    LOG.info(rleSparseVector.toString());
-    Assert.assertFalse(rleSparseVector.isEmpty());
-    Assert.assertEquals(Resource.newInstance(0, 0),
-        rleSparseVector.getCapacityAtTime(99));
-    Assert.assertEquals(Resource.newInstance(0, 0),
-        rleSparseVector.getCapacityAtTime(start + alloc.length + 1));
-    for (int i = 0; i < alloc.length; i++) {
-      Assert.assertEquals(Resource.newInstance(1024 * (alloc[i]), (alloc[i])),
-          rleSparseVector.getCapacityAtTime(start + i));
-    }
-    Assert.assertEquals(Resource.newInstance(0, 0),
-        rleSparseVector.getCapacityAtTime(start + alloc.length + 2));
-    for (Entry<ReservationInterval, Resource> ip : inputs) {
-      rleSparseVector.removeInterval(ip.getKey(), ip.getValue());
-    }
-    LOG.info(rleSparseVector.toString());
-    for (int i = 0; i < alloc.length; i++) {
-      Assert.assertEquals(Resource.newInstance(0, 0),
-          rleSparseVector.getCapacityAtTime(start + i));
-    }
-    Assert.assertTrue(rleSparseVector.isEmpty());
-  }*/
+        generateAllocations(alloc, timeSteps);
+    PeriodicRLESparseResourceAllocation periodicVector =
+        new PeriodicRLESparseResourceAllocation(rleSparseVector, 20L);
+    LOG.info(periodicVector.toString());
+    Assert.assertEquals(Resource.newInstance(5, 5),
+        periodicVector.getCapacityAtTime(10L));
+    Assert.assertEquals(Resource.newInstance(10, 10),
+        periodicVector.getCapacityAtTime(20L));
+    Assert.assertEquals(Resource.newInstance(5, 5),
+        periodicVector.getCapacityAtTime(50L));
+  }
+  
+  @Test
+  public void testMaxPeriodicCapacity() {
+    int[] alloc = { 2, 5, 7, 10, 3, 4, 6, 8};
+    long[] timeSteps = {0L, 1L, 2L, 3L, 4L, 5L, 6L, 7L};
+    RLESparseResourceAllocation rleSparseVector =
+        generateAllocations(alloc, timeSteps);
+    PeriodicRLESparseResourceAllocation periodicVector =
+        new PeriodicRLESparseResourceAllocation(rleSparseVector, 8L);
+    LOG.info(periodicVector.toString());
+    Assert.assertEquals(
+        periodicVector.getMaxPeriodicCapacity(0, 1), 
+        Resource.newInstance(10, 10));
+    Assert.assertEquals(
+        periodicVector.getMaxPeriodicCapacity(8, 2), 
+        Resource.newInstance(7, 7));
+    Assert.assertEquals(
+        periodicVector.getMaxPeriodicCapacity(16, 3), 
+        Resource.newInstance(10, 10));
+    Assert.assertEquals(
+        periodicVector.getMaxPeriodicCapacity(17, 4), 
+        Resource.newInstance(5, 5));
+    Assert.assertEquals(
+        periodicVector.getMaxPeriodicCapacity(32, 5), 
+        Resource.newInstance(4, 4));
+  }
 
+
+  RLESparseResourceAllocation generateAllocations(int[] alloc, 
+                                                  long[] timeSteps) {
+    TreeMap<Long, Resource> allocationsMap = new TreeMap<>();
+    for (int i = 0; i < alloc.length; i++) {
+      allocationsMap.put(timeSteps[i],
+                         Resource.newInstance(alloc[i], alloc[i]));
+    }
+    RLESparseResourceAllocation rleVector =
+        new RLESparseResourceAllocation(allocationsMap, 
+                                        new DefaultResourceCalculator());
+    return rleVector;
+  } 
+  
 }
