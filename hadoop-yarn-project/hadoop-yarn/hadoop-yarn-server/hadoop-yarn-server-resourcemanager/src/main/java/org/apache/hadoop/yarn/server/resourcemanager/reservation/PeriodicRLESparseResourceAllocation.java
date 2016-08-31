@@ -87,10 +87,10 @@ public class PeriodicRLESparseResourceAllocation {
   /**
    * Get maximum capacity at periodic offsets from the specified time.
    *
-   * @param tick UTC time base from which offsets are specified for finding 
+   * @param tick UTC time base from which offsets are specified for finding
    *          the maximum capacity.
    * @param period periodic offset at which capacities are evaluted.
-   * @return the maximum {@link Resource} across the specified time instants. 
+   * @return the maximum {@link Resource} across the specified time instants.
    */
   public Resource getMaxPeriodicCapacity(long tick, long period) {
     Resource maxResource;

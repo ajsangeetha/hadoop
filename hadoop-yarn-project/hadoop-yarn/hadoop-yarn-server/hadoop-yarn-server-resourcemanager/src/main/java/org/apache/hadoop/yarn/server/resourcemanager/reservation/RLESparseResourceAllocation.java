@@ -536,10 +536,10 @@ public class RLESparseResourceAllocation {
   /**
    * Get the maximum capacity across specified time instances. The search-space
    * is specified using the starting value, tick, and the periodic interval for
-   * search. Maximum resource allocation across tick, tick + period, 
+   * search. Maximum resource allocation across tick, tick + period,
    * tick + 2 * period,..., tick + n * period .. is returned.
-   * 
-   * @return maximum resource allocation  
+   *
+   * @return maximum resource allocation
    */
   public Resource getMaxPeriodicCapacity(long tick, long period) {
     Resource maxCapacity = ZERO_RESOURCE;
