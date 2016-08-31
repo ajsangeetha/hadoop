@@ -71,6 +71,8 @@ import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_NAMENODE_MAX_OBJECTS_KEY;
 import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_NAMENODE_NAME_DIR_KEY;
 import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_NAMENODE_RESOURCE_CHECK_INTERVAL_DEFAULT;
 import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_NAMENODE_RESOURCE_CHECK_INTERVAL_KEY;
+import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_NAMENODE_WRITE_LOCK_REPORTING_THRESHOLD_MS_KEY;
+import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_NAMENODE_WRITE_LOCK_REPORTING_THRESHOLD_MS_DEFAULT;
 import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_NAMENODE_RETRY_CACHE_EXPIRYTIME_MILLIS_DEFAULT;
 import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_NAMENODE_RETRY_CACHE_EXPIRYTIME_MILLIS_KEY;
 import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_NAMENODE_RETRY_CACHE_HEAP_PERCENT_DEFAULT;
@@ -819,6 +821,10 @@ public class FSNamesystem implements Namesystem, FSNamesystemMBean,
           DFS_NAMENODE_MAX_LOCK_HOLD_TO_RELEASE_LEASE_MS_KEY,
           DFS_NAMENODE_MAX_LOCK_HOLD_TO_RELEASE_LEASE_MS_DEFAULT);
 
+      this.writeLockReportingThreshold = conf.getLong(
+          DFS_NAMENODE_WRITE_LOCK_REPORTING_THRESHOLD_MS_KEY,
+          DFS_NAMENODE_WRITE_LOCK_REPORTING_THRESHOLD_MS_DEFAULT);
+
       // For testing purposes, allow the DT secret manager to be started regardless
       // of whether security is enabled.
       alwaysUseDelegationTokensForTests = conf.getBoolean(
@@ -1498,7 +1504,7 @@ public class FSNamesystem implements Namesystem, FSNamesystemMBean,
   }
 
   /** Threshold (ms) for long holding write lock report. */
-  static final short WRITELOCK_REPORTING_THRESHOLD = 1000;
+  private long writeLockReportingThreshold;
   /** Last time stamp for write lock. Keep the longest one for multi-entrance.*/
   private long writeLockHeldTimeStamp;
 
@@ -1532,7 +1538,7 @@ public class FSNamesystem implements Namesystem, FSNamesystemMBean,
 
     this.fsLock.writeLock().unlock();
 
-    if (needReport && writeLockInterval >= WRITELOCK_REPORTING_THRESHOLD) {
+    if (needReport && writeLockInterval >= this.writeLockReportingThreshold) {
       LOG.info("FSNamesystem write lock held for " + writeLockInterval +
           " ms via\n" + StringUtils.getStackTrace(Thread.currentThread()));
     }
@@ -1790,8 +1796,6 @@ public class FSNamesystem implements Namesystem, FSNamesystemMBean,
     logAuditEvent(true, "open", srcArg);
 
     if (!isInSafeMode() && res.updateAccessTime()) {
-      byte[][] pathComponents = FSDirectory.getPathComponentsForReservedPath(
-          srcArg);
       String src = srcArg;
       writeLock();
       final long now = now();
@@ -1815,8 +1819,9 @@ public class FSNamesystem implements Namesystem, FSNamesystemMBean,
          * HDFS-7463. A better fix is to change the edit log of SetTime to
          * use inode id instead of a path.
          */
-        src = dir.resolvePath(pc, srcArg, pathComponents);
-        final INodesInPath iip = dir.getINodesInPath(src, true);
+        final INodesInPath iip = dir.resolvePath(pc, srcArg);
+        src = iip.getPath();
+
         INode inode = iip.getLastINode();
         boolean updateAccessTime = inode != null &&
             now > inode.getAccessTime() + dir.getAccessTimePrecision();
@@ -2309,13 +2314,12 @@ public class FSNamesystem implements Namesystem, FSNamesystemMBean,
     boolean skipSync = false;
     FSPermissionChecker pc = getPermissionChecker();
     checkOperation(OperationCategory.WRITE);
-    byte[][] pathComponents = FSDirectory.getPathComponentsForReservedPath(src);
     writeLock();
     try {
       checkOperation(OperationCategory.WRITE);
       checkNameNodeSafeMode("Cannot recover the lease of " + src);
-      src = dir.resolvePath(pc, src, pathComponents);
-      final INodesInPath iip = dir.getINodesInPath4Write(src);
+      final INodesInPath iip = dir.resolvePathForWrite(pc, src);
+      src = iip.getPath();
       final INodeFile inode = INodeFile.valueOf(iip.getLastINode(), src);
       if (!inode.isUnderConstruction()) {
         return true;
@@ -2553,27 +2557,17 @@ public class FSNamesystem implements Namesystem, FSNamesystemMBean,
     final List<DatanodeStorageInfo> chosen;
     final boolean isStriped;
     checkOperation(OperationCategory.READ);
-    byte[][] pathComponents = FSDirectory.getPathComponentsForReservedPath(src);
     FSPermissionChecker pc = getPermissionChecker();
     readLock();
     try {
       checkOperation(OperationCategory.READ);
       //check safe mode
       checkNameNodeSafeMode("Cannot add datanode; src=" + src + ", blk=" + blk);
-      src = dir.resolvePath(pc, src, pathComponents);
+      final INodesInPath iip = dir.resolvePath(pc, src, fileId);
+      src = iip.getPath();
 
       //check lease
-      final INode inode;
-      if (fileId == HdfsConstants.GRANDFATHER_INODE_ID) {
-        // Older clients may not have given us an inode ID to work with.
-        // In this case, we have to try to resolve the path and hope it
-        // hasn't changed or been deleted since the file was opened for write.
-        inode = dir.getINode(src);
-      } else {
-        inode = dir.getInode(fileId);
-        if (inode != null) src = inode.getFullPathName();
-      }
-      final INodeFile file = checkLease(src, clientName, inode, fileId);
+      final INodeFile file = checkLease(iip, clientName, fileId);
       clientMachine = file.getFileUnderConstructionFeature().getClientMachine();
       clientnode = blockManager.getDatanodeManager().getDatanodeByHost(clientMachine);
       preferredblocksize = file.getPreferredBlockSize();
@@ -2631,8 +2625,10 @@ public class FSNamesystem implements Namesystem, FSNamesystemMBean,
         : "Holder " + holder + " does not have any open files.");
   }
 
-  INodeFile checkLease(String src, String holder, INode inode, long fileId)
+  INodeFile checkLease(INodesInPath iip, String holder, long fileId)
       throws LeaseExpiredException, FileNotFoundException {
+    String src = iip.getPath();
+    INode inode = iip.getLastINode();
     assert hasReadLock();
     if (inode == null) {
       throw new FileNotFoundException("File does not exist: "
@@ -3073,25 +3069,15 @@ public class FSNamesystem implements Namesystem, FSNamesystemMBean,
       throws IOException {
     NameNode.stateChangeLog.info("BLOCK* fsync: " + src + " for " + clientName);
     checkOperation(OperationCategory.WRITE);
-    byte[][] pathComponents = FSDirectory.getPathComponentsForReservedPath(src);
 
     FSPermissionChecker pc = getPermissionChecker();
     writeLock();
     try {
       checkOperation(OperationCategory.WRITE);
       checkNameNodeSafeMode("Cannot fsync file " + src);
-      src = dir.resolvePath(pc, src, pathComponents);
-      final INode inode;
-      if (fileId == HdfsConstants.GRANDFATHER_INODE_ID) {
-        // Older clients may not have given us an inode ID to work with.
-        // In this case, we have to try to resolve the path and hope it
-        // hasn't changed or been deleted since the file was opened for write.
-        inode = dir.getINode(src);
-      } else {
-        inode = dir.getInode(fileId);
-        if (inode != null) src = inode.getFullPathName();
-      }
-      final INodeFile pendingFile = checkLease(src, clientName, inode, fileId);
+      INodesInPath iip = dir.resolvePath(pc, src, fileId);
+      src = iip.getPath();
+      final INodeFile pendingFile = checkLease(iip, clientName, fileId);
       if (lastBlockLength > 0) {
         pendingFile.getFileUnderConstructionFeature().updateLengthOfLastBlock(
             pendingFile, lastBlockLength);
@@ -3334,7 +3320,6 @@ public class FSNamesystem implements Namesystem, FSNamesystemMBean,
       throw new IOException("Cannot finalize file " + src
           + " because it is not under construction");
     }
-    leaseManager.removeLease(uc.getClientName(), pendingFile);
 
     pendingFile.recordModification(latestSnapshot);
 
@@ -3344,6 +3329,8 @@ public class FSNamesystem implements Namesystem, FSNamesystemMBean,
     pendingFile.toCompleteFile(now(),
         allowCommittedBlock? numCommittedAllowed: 0,
         blockManager.getMinReplication());
+
+    leaseManager.removeLease(uc.getClientName(), pendingFile);
 
     // close file and persist block allocations for this file
     closeFile(src, pendingFile);
@@ -5085,7 +5072,7 @@ public class FSNamesystem implements Namesystem, FSNamesystemMBean,
         final INodeFile inode = getBlockCollection(blk);
         skip++;
         if (inode != null && blockManager.countNodes(blk).liveReplicas() == 0) {
-          String src = FSDirectory.getFullPathName(inode);
+          String src = inode.getFullPathName();
           if (src.startsWith(path)){
             corruptFiles.add(new CorruptFileBlockInfo(src, blk));
             count++;
@@ -6878,18 +6865,17 @@ public class FSNamesystem implements Namesystem, FSNamesystemMBean,
 
   void checkAccess(String src, FsAction mode) throws IOException {
     checkOperation(OperationCategory.READ);
-    byte[][] pathComponents = FSDirectory.getPathComponentsForReservedPath(src);
+    FSPermissionChecker pc = getPermissionChecker();
     readLock();
     try {
       checkOperation(OperationCategory.READ);
-      src = FSDirectory.resolvePath(src, pathComponents, dir);
-      final INodesInPath iip = dir.getINodesInPath(src, true);
+      final INodesInPath iip = dir.resolvePath(pc, src);
+      src = iip.getPath();
       INode inode = iip.getLastINode();
       if (inode == null) {
         throw new FileNotFoundException("Path not found");
       }
       if (isPermissionEnabled) {
-        FSPermissionChecker pc = getPermissionChecker();
         dir.checkPathAccess(pc, iip, mode);
       }
     } catch (AccessControlException e) {
@@ -7024,6 +7010,16 @@ public class FSNamesystem implements Namesystem, FSNamesystemMBean,
         logAuditMessage(sb.toString());
       }
     }
+
+    @Override
+    public void logAuditEvent(boolean succeeded, String userName,
+        InetAddress addr, String cmd, String src, String dst,
+        FileStatus status, UserGroupInformation ugi,
+        DelegationTokenSecretManager dtSecretManager) {
+      this.logAuditEvent(succeeded, userName, addr, cmd, src, dst, status,
+              null /*CallerContext*/, ugi, dtSecretManager);
+    }
+
     public void logAuditMessage(String message) {
       auditLog.info(message);
     }
@@ -7081,6 +7077,35 @@ public class FSNamesystem implements Namesystem, FSNamesystemMBean,
    */
   public long getBytesInFuture() {
     return blockManager.getBytesInFuture();
+  }
+
+
+  @Override // FSNamesystemMBean
+  public int getNumInMaintenanceLiveDataNodes() {
+    final List<DatanodeDescriptor> live = new ArrayList<DatanodeDescriptor>();
+    getBlockManager().getDatanodeManager().fetchDatanodes(live, null, true);
+    int liveInMaintenance = 0;
+    for (DatanodeDescriptor node : live) {
+      liveInMaintenance += node.isInMaintenance() ? 1 : 0;
+    }
+    return liveInMaintenance;
+  }
+
+  @Override // FSNamesystemMBean
+  public int getNumInMaintenanceDeadDataNodes() {
+    final List<DatanodeDescriptor> dead = new ArrayList<DatanodeDescriptor>();
+    getBlockManager().getDatanodeManager().fetchDatanodes(null, dead, true);
+    int deadInMaintenance = 0;
+    for (DatanodeDescriptor node : dead) {
+      deadInMaintenance += node.isInMaintenance() ? 1 : 0;
+    }
+    return deadInMaintenance;
+  }
+
+  @Override // FSNamesystemMBean
+  public int getNumEnteringMaintenanceDataNodes() {
+    return getBlockManager().getDatanodeManager().getEnteringMaintenanceNodes()
+        .size();
   }
 
 }

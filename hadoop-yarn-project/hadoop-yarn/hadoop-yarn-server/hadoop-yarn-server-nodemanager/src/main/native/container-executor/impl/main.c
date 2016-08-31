@@ -58,11 +58,12 @@ static void display_usage(FILE *stream) {
       "            launch docker container:      %2d appid containerid workdir container-script " \
                               "tokens pidfile nm-local-dirs nm-log-dirs docker-command-file resources optional-tc-command-file\n" \
       "            signal container:      %2d container-pid signal\n" \
-      "            delete as user:        %2d relative-path\n" ;
+      "            delete as user:        %2d relative-path\n" \
+      "            list as user:          %2d relative-path\n" ;
 
 
   fprintf(stream, usage_template, INITIALIZE_CONTAINER, LAUNCH_CONTAINER, LAUNCH_DOCKER_CONTAINER,
-          SIGNAL_CONTAINER, DELETE_AS_USER);
+          SIGNAL_CONTAINER, DELETE_AS_USER, LIST_AS_USER);
 }
 
 /* Sets up log files for normal/error logging */
@@ -96,9 +97,9 @@ in case of validation failures. Also sets up configuration / group information e
 This function is to be called in every invocation of container-executor, irrespective
 of whether an explicit checksetup operation is requested. */
 
-static void assert_valid_setup() {
+static void assert_valid_setup(char *argv0) {
   int ret;
-  char *executable_file = get_executable();
+  char *executable_file = get_executable(argv0);
   if (!executable_file) {
     fprintf(ERRORFILE,"realpath of executable: %s\n",strerror(errno));
     flush_and_close_log_files();
@@ -169,20 +170,20 @@ static void assert_valid_setup() {
 static struct {
   char *cgroups_hierarchy;
   char *traffic_control_command_file;
-  const char * run_as_user_name;
-  const char * yarn_user_name;
+  const char *run_as_user_name;
+  const char *yarn_user_name;
   char *local_dirs;
   char *log_dirs;
   char *resources_key;
   char *resources_value;
   char **resources_values;
-  const char * app_id;
-  const char * container_id;
-  const char * cred_file;
-  const char * script_file;
-  const char * current_dir;
-  const char * pid_file;
-  const char *dir_to_be_deleted;
+  const char *app_id;
+  const char *container_id;
+  const char *cred_file;
+  const char *script_file;
+  const char *current_dir;
+  const char *pid_file;
+  const char *target_dir;
   int container_pid;
   int signal;
   const char *docker_command_file;
@@ -417,8 +418,12 @@ static int validate_run_as_user_commands(int argc, char **argv, int *operation) 
     return 0;
 
   case DELETE_AS_USER:
-    cmd_input.dir_to_be_deleted = argv[optind++];
+    cmd_input.target_dir = argv[optind++];
     *operation = RUN_AS_USER_DELETE;
+    return 0;
+  case LIST_AS_USER:
+    cmd_input.target_dir = argv[optind++];
+    *operation = RUN_AS_USER_LIST;
     return 0;
   default:
     fprintf(ERRORFILE, "Invalid command %d not supported.",command);
@@ -429,7 +434,7 @@ static int validate_run_as_user_commands(int argc, char **argv, int *operation) 
 
 int main(int argc, char **argv) {
   open_log_files();
-  assert_valid_setup();
+  assert_valid_setup(argv[0]);
 
   int operation;
   int ret = validate_arguments(argc, argv, &operation);
@@ -554,8 +559,17 @@ int main(int argc, char **argv) {
     }
 
     exit_code = delete_as_user(cmd_input.yarn_user_name,
-                        cmd_input.dir_to_be_deleted,
+                        cmd_input.target_dir,
                         argv + optind);
+    break;
+  case RUN_AS_USER_LIST:
+    exit_code = set_user(cmd_input.run_as_user_name);
+
+    if (exit_code != 0) {
+      break;
+    }
+
+    exit_code = list_as_user(cmd_input.target_dir);
     break;
   }
 

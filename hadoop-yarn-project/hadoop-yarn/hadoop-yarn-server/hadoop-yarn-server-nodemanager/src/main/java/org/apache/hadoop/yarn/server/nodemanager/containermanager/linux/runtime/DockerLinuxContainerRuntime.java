@@ -40,9 +40,11 @@ import org.apache.hadoop.yarn.server.nodemanager.containermanager.linux.privileg
 import org.apache.hadoop.yarn.server.nodemanager.containermanager.linux.resources.CGroupsHandler;
 import org.apache.hadoop.yarn.server.nodemanager.containermanager.linux.resources.ResourceHandlerModule;
 import org.apache.hadoop.yarn.server.nodemanager.containermanager.linux.runtime.docker.DockerClient;
+import org.apache.hadoop.yarn.server.nodemanager.containermanager.linux.runtime.docker.DockerInspectCommand;
 import org.apache.hadoop.yarn.server.nodemanager.containermanager.linux.runtime.docker.DockerRunCommand;
 import org.apache.hadoop.yarn.server.nodemanager.containermanager.linux.runtime.docker.DockerStopCommand;
 import org.apache.hadoop.yarn.server.nodemanager.containermanager.runtime.ContainerExecutionException;
+import org.apache.hadoop.yarn.server.nodemanager.containermanager.runtime.ContainerRuntime;
 import org.apache.hadoop.yarn.server.nodemanager.containermanager.runtime.ContainerRuntimeConstants;
 import org.apache.hadoop.yarn.server.nodemanager.containermanager.runtime.ContainerRuntimeContext;
 
@@ -58,6 +60,68 @@ import java.util.Set;
 
 import static org.apache.hadoop.yarn.server.nodemanager.containermanager.linux.runtime.LinuxContainerRuntimeConstants.*;
 
+/**
+ * <p>This class is a {@link ContainerRuntime} implementation that uses the
+ * native {@code container-executor} binary via a
+ * {@link PrivilegedOperationExecutor} instance to launch processes inside
+ * Docker containers.</p>
+ *
+ * <p>The following environment variables are used to configure the Docker
+ * engine:</p>
+ *
+ * <ul>
+ *   <li>
+ *     {@code YARN_CONTAINER_RUNTIME_TYPE} ultimately determines whether a
+ *     Docker container will be used. If the value is {@code docker}, a Docker
+ *     container will be used. Otherwise a regular process tree container will
+ *     be used. This environment variable is checked by the
+ *     {@link #isDockerContainerRequested} method, which is called by the
+ *     {@link DelegatingLinuxContainerRuntime}.
+ *   </li>
+ *   <li>
+ *     {@code YARN_CONTAINER_RUNTIME_DOCKER_IMAGE} names which image
+ *     will be used to launch the Docker container.
+ *   </li>
+ *   <li>
+ *     {@code YARN_CONTAINER_RUNTIME_DOCKER_IMAGE_FILE} is currently ignored.
+ *   </li>
+ *   <li>
+ *     {@code YARN_CONTAINER_RUNTIME_DOCKER_RUN_OVERRIDE_DISABLE} controls
+ *     whether the Docker container's default command is overridden.  When set
+ *     to {@code true}, the Docker container's command will be
+ *     {@code bash <path_to_launch_script>}. When unset or set to {@code false}
+ *     the Docker container's default command is used.
+ *   </li>
+ *   <li>
+ *     {@code YARN_CONTAINER_RUNTIME_DOCKER_CONTAINER_NETWORK} sets the
+ *     network type to be used by the Docker container. It must be a valid
+ *     value as determined by the
+ *     {@code yarn.nodemanager.runtime.linux.docker.allowed-container-networks}
+ *     property.
+ *   </li>
+ *   <li>
+ *     {@code YARN_CONTAINER_RUNTIME_DOCKER_RUN_PRIVILEGED_CONTAINER}
+ *     controls whether the Docker container is a privileged container. In order
+ *     to use privileged containers, the
+ *     {@code yarn.nodemanager.runtime.linux.docker.privileged-containers.allowed}
+ *     property must be set to {@code true}, and the application owner must
+ *     appear in the value of the
+ *     {@code yarn.nodemanager.runtime.linux.docker.privileged-containers.acl}
+ *     property. If this environment variable is set to {@code true}, a
+ *     privileged Docker container will be used if allowed. No other value is
+ *     allowed, so the environment variable should be left unset rather than
+ *     setting it to false.
+ *   </li>
+ *   <li>
+ *     {@code YARN_CONTAINER_RUNTIME_DOCKER_LOCAL_RESOURCE_MOUNTS} adds
+ *     additional volume mounts to the Docker container. The value of the
+ *     environment variable should be a comma-separated list of mounts.
+ *     All such mounts must be given as {@code source:dest}, where the
+ *     source is an absolute path that is not a symlink and that points to a
+ *     localized resource.
+ *   </li>
+ * </ul>
+ */
 @InterfaceAudience.Private
 @InterfaceStability.Unstable
 public class DockerLinuxContainerRuntime implements LinuxContainerRuntime {
@@ -90,6 +154,15 @@ public class DockerLinuxContainerRuntime implements LinuxContainerRuntime {
   private CGroupsHandler cGroupsHandler;
   private AccessControlList privilegedContainersAcl;
 
+  /**
+   * Return whether the given environment variables indicate that the operation
+   * is requesting a Docker container.  If the environment contains a key
+   * called {@code YARN_CONTAINER_RUNTIME_TYPE} whose value is {@code docker},
+   * this method will return true.  Otherwise it will return false.
+   *
+   * @param env the environment variable settings for the operation
+   * @return whether a Docker container is requested
+   */
   public static boolean isDockerContainerRequested(
       Map<String, String> env) {
     if (env == null) {
@@ -101,13 +174,28 @@ public class DockerLinuxContainerRuntime implements LinuxContainerRuntime {
     return type != null && type.equals("docker");
   }
 
+  /**
+   * Create an instance using the given {@link PrivilegedOperationExecutor}
+   * instance for performing operations.
+   *
+   * @param privilegedOperationExecutor the {@link PrivilegedOperationExecutor}
+   * instance
+   */
   public DockerLinuxContainerRuntime(PrivilegedOperationExecutor
       privilegedOperationExecutor) {
-    this(privilegedOperationExecutor, ResourceHandlerModule
-        .getCGroupsHandler());
+    this(privilegedOperationExecutor,
+        ResourceHandlerModule.getCGroupsHandler());
   }
 
-  //A constructor with an injected cGroupsHandler primarily used for testing.
+  /**
+   * Create an instance using the given {@link PrivilegedOperationExecutor}
+   * instance for performing operations and the given {@link CGroupsHandler}
+   * instance. This constructor is intended for use in testing.
+   *
+   * @param privilegedOperationExecutor the {@link PrivilegedOperationExecutor}
+   * instance
+   * @param cGroupsHandler the {@link CGroupsHandler} instance
+   */
   @VisibleForTesting
   public DockerLinuxContainerRuntime(PrivilegedOperationExecutor
       privilegedOperationExecutor, CGroupsHandler cGroupsHandler) {
@@ -155,7 +243,6 @@ public class DockerLinuxContainerRuntime implements LinuxContainerRuntime {
   @Override
   public void prepareContainer(ContainerRuntimeContext ctx)
       throws ContainerExecutionException {
-
   }
 
   private void validateContainerNetworkType(String network)
@@ -170,9 +257,17 @@ public class DockerLinuxContainerRuntime implements LinuxContainerRuntime {
     throw new ContainerExecutionException(msg);
   }
 
-  public void addCGroupParentIfRequired(String resourcesOptions,
-      String containerIdStr, DockerRunCommand runCommand)
-      throws ContainerExecutionException {
+  /**
+   * If CGROUPS in enabled and not set to none, then set the CGROUP parent for
+   * the command instance.
+   *
+   * @param resourcesOptions the resource options to check for "cgroups=none"
+   * @param containerIdStr the container ID
+   * @param runCommand the command to set with the CGROUP parent
+   */
+  @VisibleForTesting
+  protected void addCGroupParentIfRequired(String resourcesOptions,
+      String containerIdStr, DockerRunCommand runCommand) {
     if (cGroupsHandler == null) {
       if (LOG.isDebugEnabled()) {
         LOG.debug("cGroupsHandler is null. cgroups are not in use. nothing to"
@@ -181,9 +276,8 @@ public class DockerLinuxContainerRuntime implements LinuxContainerRuntime {
       return;
     }
 
-    if (resourcesOptions.equals(
-        (PrivilegedOperation.CGROUP_ARG_PREFIX + PrivilegedOperation
-            .CGROUP_ARG_NO_TASKS))) {
+    if (resourcesOptions.equals(PrivilegedOperation.CGROUP_ARG_PREFIX
+            + PrivilegedOperation.CGROUP_ARG_NO_TASKS)) {
       if (LOG.isDebugEnabled()) {
         LOG.debug("no resource restrictions specified. not using docker's "
             + "cgroup options");
@@ -193,8 +287,8 @@ public class DockerLinuxContainerRuntime implements LinuxContainerRuntime {
         LOG.debug("using docker's cgroups options");
       }
 
-      String cGroupPath = "/" + cGroupsHandler.getRelativePathForCGroup(
-          containerIdStr);
+      String cGroupPath = "/"
+          + cGroupsHandler.getRelativePathForCGroup(containerIdStr);
 
       if (LOG.isDebugEnabled()) {
         LOG.debug("using cgroup parent: " + cGroupPath);
@@ -204,14 +298,25 @@ public class DockerLinuxContainerRuntime implements LinuxContainerRuntime {
     }
   }
 
+  /**
+   * Return whether the YARN container is allowed to run in a privileged
+   * Docker container. For a privileged container to be allowed all of the
+   * following three conditions must be satisfied:
+   *
+   * <ol>
+   *   <li>Submitting user must request for a privileged container</li>
+   *   <li>Privileged containers must be enabled on the cluster</li>
+   *   <li>Submitting user must be white-listed to run a privileged
+   *   container</li>
+   * </ol>
+   *
+   * @param container the target YARN container
+   * @return whether privileged container execution is allowed
+   * @throws ContainerExecutionException if privileged container execution
+   * is requested but is not allowed
+   */
   private boolean allowPrivilegedContainerExecution(Container container)
       throws ContainerExecutionException {
-    //For a privileged container to be run all of the following three conditions
-    // must be satisfied:
-    //1) Submitting user must request for a privileged container
-    //2) Privileged containers must be enabled on the cluster
-    //3) Submitting user must be whitelisted to run a privileged container
-
     Map<String, String> environment = container.getLaunchContext()
         .getEnvironment();
     String runPrivilegedContainerEnvVar = environment
@@ -344,7 +449,7 @@ public class DockerLinuxContainerRuntime implements LinuxContainerRuntime {
         .setContainerWorkDir(containerWorkDir.toString())
         .setNetworkType(network)
         .setCapabilities(capabilities)
-        .addMountLocation("/etc/passwd", "/etc/password:ro");
+        .addMountLocation("/sys/fs/cgroup", "/sys/fs/cgroup:ro", false);
     List<String> allDirs = new ArrayList<>(containerLocalDirs);
 
     allDirs.addAll(filecacheDirs);
@@ -352,7 +457,7 @@ public class DockerLinuxContainerRuntime implements LinuxContainerRuntime {
     allDirs.addAll(containerLogDirs);
     allDirs.addAll(userLocalDirs);
     for (String dir: allDirs) {
-      runCommand.addMountLocation(dir, dir);
+      runCommand.addMountLocation(dir, dir, true);
     }
 
     if (environment.containsKey(ENV_DOCKER_CONTAINER_LOCAL_RESOURCE_MOUNTS)) {
@@ -367,7 +472,7 @@ public class DockerLinuxContainerRuntime implements LinuxContainerRuntime {
           }
           String src = validateMount(dir[0], localizedResources);
           String dst = dir[1];
-          runCommand.addMountLocation(src, dst + ":ro");
+          runCommand.addMountLocation(src, dst + ":ro", true);
         }
       }
     }
@@ -380,7 +485,7 @@ public class DockerLinuxContainerRuntime implements LinuxContainerRuntime {
 
     addCGroupParentIfRequired(resourcesOpts, containerIdStr, runCommand);
 
-   Path nmPrivateContainerScriptPath = ctx.getExecutionAttribute(
+    Path nmPrivateContainerScriptPath = ctx.getExecutionAttribute(
         NM_PRIVATE_CONTAINER_SCRIPT_PATH);
 
     String disableOverride = environment.get(
@@ -488,6 +593,42 @@ public class DockerLinuxContainerRuntime implements LinuxContainerRuntime {
   @Override
   public void reapContainer(ContainerRuntimeContext ctx)
       throws ContainerExecutionException {
+  }
 
+
+  // ipAndHost[0] contains comma separated list of IPs
+  // ipAndHost[1] contains the hostname.
+  @Override
+  public String[] getIpAndHost(Container container) {
+    String containerId = container.getContainerId().toString();
+    DockerInspectCommand inspectCommand =
+        new DockerInspectCommand(containerId).getIpAndHost();
+    try {
+      String commandFile = dockerClient.writeCommandToTempFile(inspectCommand,
+          containerId);
+      PrivilegedOperation privOp = new PrivilegedOperation(
+          PrivilegedOperation.OperationType.RUN_DOCKER_CMD);
+      privOp.appendArgs(commandFile);
+      String output = privilegedOperationExecutor
+          .executePrivilegedOperation(null, privOp, null,
+              container.getLaunchContext().getEnvironment(), true, false);
+      LOG.info("Docker inspect output for " + containerId + ": " + output);
+      int index = output.lastIndexOf(',');
+      if (index == -1) {
+        LOG.error("Incorrect format for ip and host");
+        return null;
+      }
+      String ips = output.substring(0, index).trim();
+      String host = output.substring(index+1).trim();
+      String[] ipAndHost = new String[2];
+      ipAndHost[0] = ips;
+      ipAndHost[1] = host;
+      return ipAndHost;
+    } catch (ContainerExecutionException e) {
+      LOG.error("Error when writing command to temp file", e);
+    } catch (PrivilegedOperationException e) {
+      LOG.error("Error when executing command.", e);
+    }
+    return null;
   }
 }

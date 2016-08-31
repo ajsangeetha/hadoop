@@ -20,6 +20,7 @@ package org.apache.hadoop.yarn.server.resourcemanager.scheduler.fair;
 
 import java.io.IOException;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.Comparator;
 import java.util.EnumSet;
 import java.util.HashSet;
@@ -38,7 +39,6 @@ import org.apache.hadoop.yarn.api.records.ApplicationAttemptId;
 import org.apache.hadoop.yarn.api.records.ApplicationId;
 import org.apache.hadoop.yarn.api.records.Container;
 import org.apache.hadoop.yarn.api.records.ContainerId;
-import org.apache.hadoop.yarn.api.records.ContainerResourceChangeRequest;
 import org.apache.hadoop.yarn.api.records.ContainerStatus;
 import org.apache.hadoop.yarn.api.records.NodeId;
 import org.apache.hadoop.yarn.api.records.NodeState;
@@ -49,6 +49,7 @@ import org.apache.hadoop.yarn.api.records.ReservationId;
 import org.apache.hadoop.yarn.api.records.Resource;
 import org.apache.hadoop.yarn.api.records.ResourceOption;
 import org.apache.hadoop.yarn.api.records.ResourceRequest;
+import org.apache.hadoop.yarn.api.records.UpdateContainerRequest;
 import org.apache.hadoop.yarn.conf.YarnConfiguration;
 import org.apache.hadoop.yarn.exceptions.YarnException;
 import org.apache.hadoop.yarn.exceptions.YarnRuntimeException;
@@ -941,8 +942,8 @@ public class FairScheduler extends
   public Allocation allocate(ApplicationAttemptId appAttemptId,
       List<ResourceRequest> ask, List<ContainerId> release,
       List<String> blacklistAdditions, List<String> blacklistRemovals,
-      List<ContainerResourceChangeRequest> increaseRequests,
-      List<ContainerResourceChangeRequest> decreaseRequests) {
+      List<UpdateContainerRequest> increaseRequests,
+      List<UpdateContainerRequest> decreaseRequests) {
 
     // Make sure this application exists
     FSAppAttempt application = getSchedulerApp(appAttemptId);
@@ -1573,7 +1574,37 @@ public class FairScheduler extends
         allocConf = queueInfo;
         allocConf.getDefaultSchedulingPolicy().initialize(getClusterResource());
         queueMgr.updateAllocationConfiguration(allocConf);
+        applyChildDefaults();
         maxRunningEnforcer.updateRunnabilityOnReload();
+      }
+    }
+  }
+
+  /**
+   * After reloading the allocation config, the max resource settings for any
+   * ad hoc queues will be missing. This method goes through the queue manager's
+   * queue list and adds back the max resources settings for any ad hoc queues.
+   * Note that the new max resource settings will be based on the new config.
+   * The old settings are lost.
+   */
+  private void applyChildDefaults() {
+    Collection<FSQueue> queues = queueMgr.getQueues();
+    Set<String> configuredLeafQueues =
+        allocConf.getConfiguredQueues().get(FSQueueType.LEAF);
+    Set<String> configuredParentQueues =
+        allocConf.getConfiguredQueues().get(FSQueueType.PARENT);
+
+    for (FSQueue queue : queues) {
+      // If the queue is ad hoc and not root, apply the child defaults
+      if ((queue.getParent() != null) &&
+          !configuredLeafQueues.contains(queue.getName()) &&
+          !configuredParentQueues.contains(queue.getName())) {
+        Resource max =
+            allocConf.getMaxChildResources(queue.getParent().getName());
+
+        if (max != null) {
+          allocConf.setMaxResources(queue.getName(), max);
+        }
       }
     }
   }

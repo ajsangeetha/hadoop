@@ -82,15 +82,14 @@ final class FSDirAppendOp {
       final boolean logRetryCache) throws IOException {
     assert fsn.hasWriteLock();
 
-    final byte[][] pathComponents = FSDirectory
-        .getPathComponentsForReservedPath(srcArg);
     final LocatedBlock lb;
     final FSDirectory fsd = fsn.getFSDirectory();
     final String src;
+    final INodesInPath iip;
     fsd.writeLock();
     try {
-      src = fsd.resolvePath(pc, srcArg, pathComponents);
-      final INodesInPath iip = fsd.getINodesInPath4Write(src);
+      iip = fsd.resolvePathForWrite(pc, srcArg);
+      src = iip.getPath();
       // Verify that the destination does not exist as a directory already
       final INode inode = iip.getLastINode();
       final String path = iip.getPath();
@@ -150,8 +149,7 @@ final class FSDirAppendOp {
       fsd.writeUnlock();
     }
 
-    HdfsFileStatus stat = FSDirStatAndListingOp.getFileInfo(fsd, src, false,
-        FSDirectory.isReservedRawName(srcArg));
+    HdfsFileStatus stat = FSDirStatAndListingOp.getFileInfo(fsd, iip);
     if (lb != null) {
       NameNode.stateChangeLog.debug(
           "DIR* NameSystem.appendFile: file {} for {} at {} block {} block"

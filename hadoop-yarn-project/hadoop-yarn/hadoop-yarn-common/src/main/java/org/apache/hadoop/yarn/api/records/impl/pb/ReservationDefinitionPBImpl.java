@@ -162,8 +162,9 @@ public class ReservationDefinitionPBImpl extends ReservationDefinition {
   @Override
   public String toString() {
     return "{Arrival: " + getArrival() + ", Deadline: " + getDeadline()
-        + ", Reservation Name: " + getReservationName() + ", Period: "
-        + getPeriodicity() + ", Resources: " + getReservationRequests() + "}";
+        + ", Reservation Name: " + getReservationName()
+        + ", Recurrence expression: " + getRecurrenceExpression()
+        + ", Resources: " + getReservationRequests() + "}";
   }
 
   @Override
@@ -182,19 +183,19 @@ public class ReservationDefinitionPBImpl extends ReservationDefinition {
   }
 
   @Override
-  public long getPeriodicity() {
+  public String getRecurrenceExpression() {
     ReservationDefinitionProtoOrBuilder p = viaProto ? proto : builder;
-    if (p.hasPeriod()) {
-      long period = p.getPeriod();
-      return period;
+    if (p.hasRecurrenceExpression()) {
+      String recurrenceExpression = p.getRecurrenceExpression();
+      return recurrenceExpression;
     } else {
-      return 0L;
+      return "0";
     }
   }
 
   @Override
-  public void setPeriodicity(long period) {
-    builder.setPeriod(period);
+  public void setRecurrenceExpression(String recurrenceExpression) {
+    builder.setRecurrenceExpression(recurrenceExpression);
   }
 
 }

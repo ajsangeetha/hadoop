@@ -38,7 +38,9 @@ import org.apache.hadoop.yarn.server.nodemanager.containermanager.linux.privileg
 import org.apache.hadoop.yarn.server.nodemanager.containermanager.linux.resources.ResourceHandler;
 import org.apache.hadoop.yarn.server.nodemanager.containermanager.linux.resources.ResourceHandlerException;
 import org.apache.hadoop.yarn.server.nodemanager.containermanager.linux.resources.ResourceHandlerModule;
+import org.apache.hadoop.yarn.server.nodemanager.containermanager.linux.runtime.DefaultLinuxContainerRuntime;
 import org.apache.hadoop.yarn.server.nodemanager.containermanager.linux.runtime.DelegatingLinuxContainerRuntime;
+import org.apache.hadoop.yarn.server.nodemanager.containermanager.linux.runtime.DockerLinuxContainerRuntime;
 import org.apache.hadoop.yarn.server.nodemanager.containermanager.linux.runtime.LinuxContainerRuntime;
 import org.apache.hadoop.yarn.server.nodemanager.containermanager.localizer.ContainerLocalizer;
 import org.apache.hadoop.yarn.server.nodemanager.containermanager.runtime.ContainerExecutionException;
@@ -52,7 +54,6 @@ import org.apache.hadoop.yarn.server.nodemanager.executor.LocalizerStartContext;
 import org.apache.hadoop.yarn.server.nodemanager.util.CgroupsLCEResourcesHandler;
 import org.apache.hadoop.yarn.server.nodemanager.util.DefaultLCEResourcesHandler;
 import org.apache.hadoop.yarn.server.nodemanager.util.LCEResourcesHandler;
-
 import java.io.File;
 import java.io.IOException;
 import java.net.InetSocketAddress;
@@ -64,11 +65,36 @@ import java.util.regex.Pattern;
 
 import static org.apache.hadoop.yarn.server.nodemanager.containermanager.linux.runtime.LinuxContainerRuntimeConstants.*;
 
-/** Container execution for Linux. Provides linux-specific localization
- * mechanisms, resource management via cgroups and can switch between multiple
- * container runtimes - e.g Standard "Process Tree", Docker etc
+/**
+ * <p>This class provides {@link Container} execution using a native
+ * {@code container-executor} binary. By using a helper written it native code,
+ * this class is able to do several things that the
+ * {@link DefaultContainerExecutor} cannot, such as execution of applications
+ * as the applications' owners, provide localization that takes advantage of
+ * mapping the application owner to a UID on the execution host, resource
+ * management through Linux CGROUPS, and Docker support.</p>
+ *
+ * <p>If {@code hadoop.security.authetication} is set to {@code simple},
+ * then the
+ * {@code yarn.nodemanager.linux-container-executor.nonsecure-mode.limit-users}
+ * property will determine whether the {@code LinuxContainerExecutor} runs
+ * processes as the application owner or as the default user, as set in the
+ * {@code yarn.nodemanager.linux-container-executor.nonsecure-mode.local-user}
+ * property.</p>
+ *
+ * <p>The {@code LinuxContainerExecutor} will manage applications through an
+ * appropriate {@link LinuxContainerRuntime} instance. This class uses a
+ * {@link DelegatingLinuxContainerRuntime} instance, which will delegate calls
+ * to either a {@link DefaultLinuxContainerRuntime} instance or a
+ * {@link DockerLinuxContainerRuntime} instance, depending on the job's
+ * configuration.</p>
+ *
+ * @see LinuxContainerRuntime
+ * @see DelegatingLinuxContainerRuntime
+ * @see DefaultLinuxContainerRuntime
+ * @see DockerLinuxContainerRuntime
+ * @see DockerLinuxContainerRuntime#isDockerContainerRequested
  */
-
 public class LinuxContainerExecutor extends ContainerExecutor {
 
   private static final Log LOG = LogFactory
@@ -83,10 +109,18 @@ public class LinuxContainerExecutor extends ContainerExecutor {
   private ResourceHandler resourceHandlerChain;
   private LinuxContainerRuntime linuxContainerRuntime;
 
+  /**
+   * Default constructor to allow for creation through reflection.
+   */
   public LinuxContainerExecutor() {
   }
 
-  // created primarily for testing
+  /**
+   * Create a LinuxContainerExecutor with a provided
+   * {@link LinuxContainerRuntime}.  Used primarily for testing.
+   *
+   * @param linuxContainerRuntime the runtime to use
+   */
   public LinuxContainerExecutor(LinuxContainerRuntime linuxContainerRuntime) {
     this.linuxContainerRuntime = linuxContainerRuntime;
   }
@@ -154,6 +188,13 @@ public class LinuxContainerExecutor extends ContainerExecutor {
     }
   }
 
+  /**
+   * Get the path to the {@code container-executor} binary. The path will
+   * be absolute.
+   *
+   * @param conf the {@link Configuration}
+   * @return the path to the {@code container-executor} binary
+   */
   protected String getContainerExecutorExecutablePath(Configuration conf) {
     String yarnHomeEnvVar =
         System.getenv(ApplicationConstants.Environment.HADOOP_YARN_HOME.key());
@@ -166,6 +207,14 @@ public class LinuxContainerExecutor extends ContainerExecutor {
         defaultPath);
   }
 
+  /**
+   * Add a niceness level to the process that will be executed.  Adds
+   * {@code -n <nice>} to the given command. The niceness level will be
+   * taken from the
+   * {@code yarn.nodemanager.container-executer.os.sched.prioity} property.
+   *
+   * @param command the command to which to add the niceness setting.
+   */
   protected void addSchedPriorityCommand(List<String> command) {
     if (containerSchedPriorityIsSet) {
       command.addAll(Arrays.asList("nice", "-n",
@@ -294,6 +343,17 @@ public class LinuxContainerExecutor extends ContainerExecutor {
     }
   }
 
+  /**
+   * Set up the {@link ContainerLocalizer}.
+   *
+   * @param command the current ShellCommandExecutor command line
+   * @param user localization user
+   * @param appId localized app id
+   * @param locId localizer id
+   * @param nmAddr nodemanager address
+   * @param localDirs list of local dirs
+   * @see ContainerLocalizer#buildMainArgs
+   */
   @VisibleForTesting
   public void buildMainArgs(List<String> command, String user, String appId,
       String locId, InetSocketAddress nmAddr, List<String> localDirs) {
@@ -463,6 +523,11 @@ public class LinuxContainerExecutor extends ContainerExecutor {
   }
 
   @Override
+  public String[] getIpAndHost(Container container) {
+    return linuxContainerRuntime.getIpAndHost(container);
+  }
+
+  @Override
   public int reacquireContainer(ContainerReacquisitionContext ctx)
       throws IOException, InterruptedException {
     ContainerId containerId = ctx.getContainerId();
@@ -579,6 +644,45 @@ public class LinuxContainerExecutor extends ContainerExecutor {
   }
 
   @Override
+  protected File[] readDirAsUser(String user, Path dir) {
+    List<File> files = new ArrayList<>();
+    PrivilegedOperation listAsUserOp = new PrivilegedOperation(
+        PrivilegedOperation.OperationType.LIST_AS_USER, (String)null);
+    String runAsUser = getRunAsUser(user);
+    String dirString = "";
+
+    if (dir != null) {
+      dirString = dir.toUri().getPath();
+    }
+
+    listAsUserOp.appendArgs(runAsUser, user,
+        Integer.toString(
+            PrivilegedOperation.RunAsUserCommand.LIST_AS_USER.getValue()),
+        dirString);
+
+    try {
+      PrivilegedOperationExecutor privOpExecutor =
+          PrivilegedOperationExecutor.getInstance(super.getConf());
+
+      String results =
+          privOpExecutor.executePrivilegedOperation(listAsUserOp, true);
+
+      for (String file: results.split("\n")) {
+        // The container-executor always dumps its log output to stdout, which
+        // includes 3 lines that start with "main : "
+        if (!file.startsWith("main :")) {
+          files.add(new File(new File(dirString), file));
+        }
+      }
+    } catch (PrivilegedOperationException e) {
+      LOG.error("ListAsUser for " + dir + " returned with exit code: "
+          + e.getExitCode(), e);
+    }
+
+    return files.toArray(new File[files.size()]);
+  }
+
+  @Override
   public boolean isContainerAlive(ContainerLivenessContext ctx)
       throws IOException {
     String user = ctx.getUser();
@@ -594,6 +698,15 @@ public class LinuxContainerExecutor extends ContainerExecutor {
         .build());
   }
 
+  /**
+   * Mount a CGROUPS controller at the requested mount point and create
+   * a hierarchy for the NodeManager to manage.
+   *
+   * @param cgroupKVs a key-value pair of the form
+   * {@code controller=mount-path}
+   * @param hierarchy the top directory of the hierarchy for the NodeManager
+   * @throws IOException if there is a problem mounting the CGROUPS
+   */
   public void mountCgroups(List<String> cgroupKVs, String hierarchy)
       throws IOException {
     try {

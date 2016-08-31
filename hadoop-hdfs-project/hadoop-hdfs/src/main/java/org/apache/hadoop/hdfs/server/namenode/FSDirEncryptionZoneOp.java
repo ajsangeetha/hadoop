@@ -22,6 +22,7 @@ import static org.apache.hadoop.hdfs.server.common.HdfsServerConstants.CRYPTO_XA
 import java.io.FileNotFoundException;
 import java.io.IOException;
 import java.security.GeneralSecurityException;
+import java.security.PrivilegedExceptionAction;
 import java.util.AbstractMap;
 import java.util.concurrent.ExecutorService;
 import java.util.EnumSet;
@@ -45,6 +46,7 @@ import org.apache.hadoop.hdfs.protocol.HdfsFileStatus;
 import org.apache.hadoop.hdfs.protocol.SnapshotAccessControlException;
 import org.apache.hadoop.hdfs.protocol.proto.HdfsProtos;
 import org.apache.hadoop.hdfs.protocolPB.PBHelperClient;
+import org.apache.hadoop.security.SecurityUtil;
 
 import com.google.common.base.Preconditions;
 import com.google.common.collect.Lists;
@@ -76,13 +78,22 @@ final class FSDirEncryptionZoneOp {
     if (ezKeyName == null) {
       return null;
     }
-    EncryptedKeyVersion edek = null;
     long generateEDEKStartTime = monotonicNow();
-    try {
-      edek = fsd.getProvider().generateEncryptedKey(ezKeyName);
-    } catch (GeneralSecurityException e) {
-      throw new IOException(e);
-    }
+    // Generate EDEK with login user (hdfs) so that KMS does not need
+    // an extra proxy configuration allowing hdfs to proxy its clients and
+    // KMS does not need configuration to allow non-hdfs user GENERATE_EEK
+    // operation.
+    EncryptedKeyVersion edek = SecurityUtil.doAsLoginUser(
+        new PrivilegedExceptionAction<EncryptedKeyVersion>() {
+          @Override
+          public EncryptedKeyVersion run() throws IOException {
+            try {
+              return fsd.getProvider().generateEncryptedKey(ezKeyName);
+            } catch (GeneralSecurityException e) {
+              throw new IOException(e);
+            }
+          }
+        });
     long generateEDEKTime = monotonicNow() - generateEDEKStartTime;
     NameNode.getNameNodeMetrics().addGenerateEDEKTime(generateEDEKTime);
     Preconditions.checkNotNull(edek);
@@ -135,8 +146,6 @@ final class FSDirEncryptionZoneOp {
   static HdfsFileStatus createEncryptionZone(final FSDirectory fsd,
       final String srcArg, final FSPermissionChecker pc, final String cipher,
       final String keyName, final boolean logRetryCache) throws IOException {
-    final byte[][] pathComponents = FSDirectory
-        .getPathComponentsForReservedPath(srcArg);
     final CipherSuite suite = CipherSuite.convert(cipher);
     List<XAttr> xAttrs = Lists.newArrayListWithCapacity(1);
     final String src;
@@ -146,7 +155,8 @@ final class FSDirEncryptionZoneOp {
 
     fsd.writeLock();
     try {
-      src = fsd.resolvePath(pc, srcArg, pathComponents);
+      final INodesInPath iip = fsd.resolvePath(pc, srcArg);
+      src = iip.getPath();
       final XAttr ezXAttr = fsd.ezManager.createEncryptionZone(src, suite,
           version, keyName);
       xAttrs.add(ezXAttr);
@@ -169,15 +179,11 @@ final class FSDirEncryptionZoneOp {
   static Map.Entry<EncryptionZone, HdfsFileStatus> getEZForPath(
       final FSDirectory fsd, final String srcArg, final FSPermissionChecker pc)
       throws IOException {
-    final byte[][] pathComponents = FSDirectory
-        .getPathComponentsForReservedPath(srcArg);
-    final String src;
     final INodesInPath iip;
     final EncryptionZone ret;
     fsd.readLock();
     try {
-      src = fsd.resolvePath(pc, srcArg, pathComponents);
-      iip = fsd.getINodesInPath(src, true);
+      iip = fsd.resolvePath(pc, srcArg);
       if (iip.getLastINode() == null) {
         throw new FileNotFoundException("Path not found: " + iip.getPath());
       }

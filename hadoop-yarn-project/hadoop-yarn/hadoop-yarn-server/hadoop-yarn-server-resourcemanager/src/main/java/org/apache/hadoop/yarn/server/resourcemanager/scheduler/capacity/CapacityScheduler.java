@@ -51,7 +51,6 @@ import org.apache.hadoop.yarn.api.records.ApplicationAttemptId;
 import org.apache.hadoop.yarn.api.records.ApplicationId;
 import org.apache.hadoop.yarn.api.records.Container;
 import org.apache.hadoop.yarn.api.records.ContainerId;
-import org.apache.hadoop.yarn.api.records.ContainerResourceChangeRequest;
 import org.apache.hadoop.yarn.api.records.ContainerStatus;
 import org.apache.hadoop.yarn.api.records.NodeId;
 import org.apache.hadoop.yarn.api.records.NodeState;
@@ -63,6 +62,7 @@ import org.apache.hadoop.yarn.api.records.ReservationId;
 import org.apache.hadoop.yarn.api.records.Resource;
 import org.apache.hadoop.yarn.api.records.ResourceOption;
 import org.apache.hadoop.yarn.api.records.ResourceRequest;
+import org.apache.hadoop.yarn.api.records.UpdateContainerRequest;
 import org.apache.hadoop.yarn.conf.YarnConfiguration;
 import org.apache.hadoop.yarn.exceptions.InvalidResourceRequestException;
 import org.apache.hadoop.yarn.exceptions.YarnException;
@@ -94,6 +94,7 @@ import org.apache.hadoop.yarn.server.resourcemanager.rmnode.RMNodeResourceUpdate
 import org.apache.hadoop.yarn.server.resourcemanager.rmnode.UpdatedContainerInfo;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.AbstractYarnScheduler;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.Allocation;
+import org.apache.hadoop.yarn.server.resourcemanager.scheduler.AppSchedulingInfo;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.NodeType;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.PreemptableResourceScheduler;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.Queue;
@@ -108,6 +109,11 @@ import org.apache.hadoop.yarn.server.resourcemanager.scheduler.SchedulerDynamicE
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.SchedulerHealth;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.SchedulerNode;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.SchedulerUtils;
+import org.apache.hadoop.yarn.server.resourcemanager.scheduler.activities.ActivityDiagnosticConstant;
+import org.apache.hadoop.yarn.server.resourcemanager.scheduler.activities.ActivitiesLogger;
+import org.apache.hadoop.yarn.server.resourcemanager.scheduler.activities.ActivitiesManager;
+import org.apache.hadoop.yarn.server.resourcemanager.scheduler.activities.ActivityState;
+import org.apache.hadoop.yarn.server.resourcemanager.scheduler.activities.AllocationState;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.capacity.preemption.KillableContainer;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.capacity.preemption.PreemptionManager;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.common.AssignmentInformation;
@@ -307,6 +313,8 @@ public class CapacityScheduler extends
     this.applications = new ConcurrentHashMap<>();
     this.labelManager = rmContext.getNodeLabelManager();
     authorizer = YarnAuthorizationProvider.getInstance(yarnConf);
+    this.activitiesManager = new ActivitiesManager(rmContext);
+    activitiesManager.init(conf);
     initializeQueues(this.conf);
     this.isLazyPreemptionEnabled = conf.getLazyPreemptionEnabled();
 
@@ -344,6 +352,7 @@ public class CapacityScheduler extends
   @Override
   public void serviceStart() throws Exception {
     startSchedulerThreads();
+    activitiesManager.start();
     super.serviceStart();
   }
 
@@ -523,7 +532,7 @@ public class CapacityScheduler extends
     Map<String, CSQueue> newQueues = new HashMap<String, CSQueue>();
     CSQueue newRoot = 
         parseQueue(this, conf, null, CapacitySchedulerConfiguration.ROOT, 
-            newQueues, queues, noop); 
+            newQueues, queues, noop);
     
     // Ensure all existing queues are still present
     validateExistingQueues(queues, newQueues);
@@ -650,7 +659,7 @@ public class CapacityScheduler extends
         throw new IllegalStateException(
             "Only Leaf Queues can be reservable for " + queueName);
       }
-      ParentQueue parentQueue = 
+      ParentQueue parentQueue =
         new ParentQueue(csContext, queueName, parent, oldQueues.get(queueName));
 
       // Used only for unit tests
@@ -802,7 +811,7 @@ public class CapacityScheduler extends
 
     FiCaSchedulerApp attempt = new FiCaSchedulerApp(applicationAttemptId,
         application.getUser(), queue, queue.getActiveUsersManager(), rmContext,
-            application.getPriority(), isAttemptRecovering);
+            application.getPriority(), isAttemptRecovering, activitiesManager);
     if (transferStateFromPreviousAttempt) {
       attempt.transferStateFromPreviousAttempt(
           application.getCurrentAppAttempt());
@@ -916,7 +925,7 @@ public class CapacityScheduler extends
   //    SchedContainerChangeRequest
   // 2. Deadlock with the scheduling thread.
   private LeafQueue updateIncreaseRequests(
-      List<ContainerResourceChangeRequest> increaseRequests,
+      List<UpdateContainerRequest> increaseRequests,
       FiCaSchedulerApp app) {
     if (null == increaseRequests || increaseRequests.isEmpty()) {
       return null;
@@ -944,8 +953,8 @@ public class CapacityScheduler extends
   public Allocation allocate(ApplicationAttemptId applicationAttemptId,
       List<ResourceRequest> ask, List<ContainerId> release,
       List<String> blacklistAdditions, List<String> blacklistRemovals,
-      List<ContainerResourceChangeRequest> increaseRequests,
-      List<ContainerResourceChangeRequest> decreaseRequests) {
+      List<UpdateContainerRequest> increaseRequests,
+      List<UpdateContainerRequest> decreaseRequests) {
 
     FiCaSchedulerApp application = getApplicationAttempt(applicationAttemptId);
     if (application == null) {
@@ -1233,6 +1242,7 @@ public class CapacityScheduler extends
 
     RMContainer reservedContainer = node.getReservedContainer();
     if (reservedContainer != null) {
+
       FiCaSchedulerApp reservedApplication =
           getCurrentAttemptForContainer(reservedContainer.getContainerId());
 
@@ -1262,6 +1272,19 @@ public class CapacityScheduler extends
         tmp.getAssignmentInformation().incrAllocations();
         updateSchedulerHealth(lastNodeUpdateTime, node, tmp);
         schedulerHealth.updateSchedulerFulfilledReservationCounts(1);
+
+        ActivitiesLogger.QUEUE.recordQueueActivity(activitiesManager, node,
+            queue.getParent().getQueueName(), queue.getQueueName(),
+            ActivityState.ACCEPTED, ActivityDiagnosticConstant.EMPTY);
+        ActivitiesLogger.NODE.finishAllocatedNodeAllocation(activitiesManager,
+            node, reservedContainer.getContainerId(),
+            AllocationState.ALLOCATED_FROM_RESERVED);
+      } else {
+        ActivitiesLogger.QUEUE.recordQueueActivity(activitiesManager, node,
+            queue.getParent().getQueueName(), queue.getQueueName(),
+            ActivityState.ACCEPTED, ActivityDiagnosticConstant.EMPTY);
+        ActivitiesLogger.NODE.finishAllocatedNodeAllocation(activitiesManager,
+            node, reservedContainer.getContainerId(), AllocationState.SKIPPED);
       }
     }
 
@@ -1371,7 +1394,11 @@ public class CapacityScheduler extends
       setLastNodeUpdateTime(Time.now());
       nodeUpdate(node);
       if (!scheduleAsynchronously) {
+        ActivitiesLogger.NODE.startNodeUpdateRecording(activitiesManager,
+            node.getNodeID());
         allocateContainersToNode(getNode(node.getNodeID()));
+        ActivitiesLogger.NODE.finishNodeUpdateRecording(activitiesManager,
+            node.getNodeID());
       }
     }
     break;
@@ -1920,6 +1947,7 @@ public class CapacityScheduler extends
     LeafQueue dest = getAndCheckLeafQueue(destQueueName);
     // Validation check - ACLs, submission limits for user & queue
     String user = app.getUser();
+    checkQueuePartition(app, dest);
     try {
       dest.submitApplication(appId, user, destQueueName);
     } catch (AccessControlException e) {
@@ -1942,6 +1970,39 @@ public class CapacityScheduler extends
     LOG.info("App: " + app.getApplicationId() + " successfully moved from "
         + sourceQueueName + " to: " + destQueueName);
     return targetQueueName;
+  }
+
+  /**
+   * Check application can be moved to queue with labels enabled. All labels in
+   * application life time will be checked
+   *
+   * @param appId
+   * @param dest
+   * @throws YarnException
+   */
+  private void checkQueuePartition(FiCaSchedulerApp app, LeafQueue dest)
+      throws YarnException {
+    if (!YarnConfiguration.areNodeLabelsEnabled(conf)) {
+      return;
+    }
+    Set<String> targetqueuelabels = dest.getAccessibleNodeLabels();
+    AppSchedulingInfo schedulingInfo = app.getAppSchedulingInfo();
+    Set<String> appLabelexpressions = schedulingInfo.getRequestedPartitions();
+    // default partition access always available remove empty label
+    appLabelexpressions.remove(RMNodeLabelsManager.NO_LABEL);
+    Set<String> nonAccessiblelabels = new HashSet<String>();
+    for (String label : appLabelexpressions) {
+      if (!SchedulerUtils.checkQueueLabelExpression(targetqueuelabels, label,
+          null)) {
+        nonAccessiblelabels.add(label);
+      }
+    }
+    if (nonAccessiblelabels.size() > 0) {
+      throw new YarnException(
+          "Specified queue=" + dest.getQueueName() + " can't satisfy following "
+              + "apps label expressions =" + nonAccessiblelabels
+              + " accessible node labels =" + targetqueuelabels);
+    }
   }
 
   /**

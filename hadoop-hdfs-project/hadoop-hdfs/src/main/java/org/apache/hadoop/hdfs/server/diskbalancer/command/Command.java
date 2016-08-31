@@ -18,7 +18,10 @@
 
 package org.apache.hadoop.hdfs.server.diskbalancer.command;
 
+import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Preconditions;
+import com.google.common.collect.Lists;
+
 import org.apache.commons.cli.CommandLine;
 import org.apache.commons.cli.Option;
 import org.apache.commons.lang.StringUtils;
@@ -33,13 +36,18 @@ import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.hdfs.DFSConfigKeys;
 import org.apache.hadoop.hdfs.DFSUtilClient;
 import org.apache.hadoop.hdfs.protocol.ClientDatanodeProtocol;
+import org.apache.hadoop.hdfs.server.diskbalancer.DiskBalancerConstants;
 import org.apache.hadoop.hdfs.server.diskbalancer.connectors.ClusterConnector;
 import org.apache.hadoop.hdfs.server.diskbalancer.connectors.ConnectorFactory;
 import org.apache.hadoop.hdfs.server.diskbalancer.datamodel.DiskBalancerCluster;
 import org.apache.hadoop.hdfs.server.diskbalancer.datamodel.DiskBalancerDataNode;
+import org.apache.hadoop.hdfs.server.diskbalancer.datamodel.DiskBalancerVolume;
+import org.apache.hadoop.hdfs.server.diskbalancer.datamodel.DiskBalancerVolumeSet;
 import org.apache.hadoop.hdfs.tools.DiskBalancer;
 import org.apache.hadoop.net.NetUtils;
 import org.apache.hadoop.security.UserGroupInformation;
+import org.codehaus.jackson.map.ObjectMapper;
+import org.codehaus.jackson.map.ObjectReader;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -65,6 +73,8 @@ import java.util.TreeSet;
  * Common interface for command handling.
  */
 public abstract class Command extends Configured {
+  private static final ObjectReader READER =
+      new ObjectMapper().reader(HashMap.class);
   static final Logger LOG = LoggerFactory.getLogger(Command.class);
   private Map<String, String> validArgs = new HashMap<>();
   private URI clusterURI;
@@ -214,7 +224,7 @@ public abstract class Command extends Configured {
    * @return Set of node names
    * @throws IOException
    */
-  private Set<String> getNodeList(String listArg) throws IOException {
+  protected Set<String> getNodeList(String listArg) throws IOException {
     URL listURL;
     String nodeData;
     Set<String> resultSet = new TreeSet<>();
@@ -233,6 +243,37 @@ public abstract class Command extends Configured {
     String[] nodes = nodeData.split(",");
     Collections.addAll(resultSet, nodes);
     return resultSet;
+  }
+
+  /**
+   * Returns a DiskBalancer Node list from the Cluster or null if not found.
+   *
+   * @param listArg String File URL or a comma separated list of node names.
+   * @return List of DiskBalancer Node
+   * @throws IOException
+   */
+  protected List<DiskBalancerDataNode> getNodes(String listArg)
+      throws IOException {
+    Set<String> nodeNames = null;
+    List<DiskBalancerDataNode> nodeList = Lists.newArrayList();
+
+    if ((listArg == null) || listArg.isEmpty()) {
+      return nodeList;
+    }
+    nodeNames = getNodeList(listArg);
+
+    DiskBalancerDataNode node = null;
+    if (!nodeNames.isEmpty()) {
+      for (String name : nodeNames) {
+        node = getNode(name);
+
+        if (node != null) {
+          nodeList.add(node);
+        }
+      }
+    }
+
+    return nodeList;
   }
 
   /**
@@ -421,6 +462,36 @@ public abstract class Command extends Configured {
   }
 
   /**
+   * Reads the Physical path of the disks we are balancing. This is needed to
+   * make the disk balancer human friendly and not used in balancing.
+   *
+   * @param node - Disk Balancer Node.
+   */
+  protected void populatePathNames(
+      DiskBalancerDataNode node) throws IOException {
+    // if the cluster is a local file system, there is no need to
+    // invoke rpc call to dataNode.
+    if (getClusterURI().getScheme().startsWith("file")) {
+      return;
+    }
+    String dnAddress = node.getDataNodeIP() + ":" + node.getDataNodePort();
+    ClientDatanodeProtocol dnClient = getDataNodeProxy(dnAddress);
+    String volumeNameJson = dnClient.getDiskBalancerSetting(
+        DiskBalancerConstants.DISKBALANCER_VOLUME_NAME);
+
+    @SuppressWarnings("unchecked")
+    Map<String, String> volumeMap =
+        READER.readValue(volumeNameJson);
+    for (DiskBalancerVolumeSet set : node.getVolumeSets().values()) {
+      for (DiskBalancerVolume vol : set.getVolumes()) {
+        if (volumeMap.containsKey(vol.getUuid())) {
+          vol.setPath(volumeMap.get(vol.getUuid()));
+        }
+      }
+    }
+  }
+
+  /**
    * Set top number of nodes to be processed.
    * */
   public void setTopNodes(int topNodes) {
@@ -433,5 +504,13 @@ public abstract class Command extends Configured {
    * */
   public int getTopNodes() {
     return topNodes;
+  }
+
+  /**
+   * Set DiskBalancer cluster
+   */
+  @VisibleForTesting
+  public void setCluster(DiskBalancerCluster newCluster) {
+    this.cluster = newCluster;
   }
 }

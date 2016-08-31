@@ -15,6 +15,12 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
+/* FreeBSD protects the getline() prototype. See getline(3) for more */
+#ifdef __FreeBSD__
+#define _WITH_GETLINE
+#endif
+
 #include <pwd.h>
 #include <stdio.h>
 #include <sys/types.h>
@@ -25,7 +31,8 @@ enum command {
   LAUNCH_CONTAINER = 1,
   SIGNAL_CONTAINER = 2,
   DELETE_AS_USER = 3,
-  LAUNCH_DOCKER_CONTAINER = 4
+  LAUNCH_DOCKER_CONTAINER = 4,
+  LIST_AS_USER = 5
 };
 
 enum errorcodes {
@@ -73,7 +80,8 @@ enum operations {
   RUN_AS_USER_SIGNAL_CONTAINER = 8,
   RUN_AS_USER_DELETE = 9,
   RUN_AS_USER_LAUNCH_DOCKER_CONTAINER = 10,
-  RUN_DOCKER = 11
+  RUN_DOCKER = 11,
+  RUN_AS_USER_LIST = 12
 };
 
 #define NM_GROUP_KEY "yarn.nodemanager.linux-container-executor.group"
@@ -96,7 +104,7 @@ extern FILE *LOGFILE;
 extern FILE *ERRORFILE;
 
 // get the executable's filename
-char* get_executable();
+char* get_executable(char *argv0);
 
 //function used to load the configurations present in the secure config
 void read_executor_config(const char* file_name);
@@ -182,6 +190,10 @@ int signal_container_as_user(const char *user, int pid, int sig);
 int delete_as_user(const char *user,
                    const char *dir_to_be_deleted,
                    char* const* baseDirs);
+
+// List the files in the given directory on stdout. The target_dir is always
+// assumed to be an absolute path.
+int list_as_user(const char *target_dir);
 
 // set the uid and gid of the node manager.  This is used when doing some
 // priviledged operations for setting the effective uid and gid.
@@ -273,3 +285,13 @@ int traffic_control_read_stats(char *command_file);
  * Run a docker command passing the command file as an argument
  */
 int run_docker(const char *command_file);
+
+/**
+ * Function to prepare the container directories.
+ * It creates the container work and log directories.
+ */
+int create_container_directories(const char* user, const char *app_id,
+                     const char *container_id, char* const* local_dir,
+                     char* const* log_dir, const char *work_dir);
+
+int create_log_dirs(const char *app_id, char * const * log_dirs);
