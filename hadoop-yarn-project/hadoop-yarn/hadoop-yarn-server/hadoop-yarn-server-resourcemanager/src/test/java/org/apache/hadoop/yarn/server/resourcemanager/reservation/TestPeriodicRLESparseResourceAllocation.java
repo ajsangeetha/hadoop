@@ -1,4 +1,4 @@
-/*******************************************************************************
+/******************************************************************************
  *   Licensed to the Apache Software Foundation (ASF) under one
  *   or more contributor license agreements.  See the NOTICE file
  *   distributed with this work for additional information
@@ -14,26 +14,24 @@
  *   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
  *   See the License for the specific language governing permissions and
  *   limitations under the License.
- *******************************************************************************/
+ *****************************************************************************/
 package org.apache.hadoop.yarn.server.resourcemanager.reservation;
 
 import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertNull;
-import static org.junit.Assert.fail;
 
-import java.util.Set;
-import java.util.Map.Entry;
 import java.util.TreeMap;
 
 import org.apache.hadoop.yarn.api.records.Resource;
 import org.apache.hadoop.yarn.util.resource.DefaultResourceCalculator;
 import org.apache.hadoop.yarn.util.resource.ResourceCalculator;
 import org.junit.Assert;
-import org.junit.Ignore;
 import org.junit.Test;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+/**
+ * Testing the class PeriodicRLESparseResourceAllocation
+ */
 public class TestPeriodicRLESparseResourceAllocation {
 
   private static final Logger LOG = LoggerFactory
@@ -41,7 +39,7 @@ public class TestPeriodicRLESparseResourceAllocation {
 
   @Test
   public void testPeriodicCapacity() {
-    int[] alloc = { 10, 7, 5, 2, 0};
+    int[] alloc = {10, 7, 5, 2, 0};
     long[] timeSteps = {0L, 5L, 10L, 15L, 19L};
     RLESparseResourceAllocation rleSparseVector =
         generateAllocations(alloc, timeSteps);
@@ -58,7 +56,7 @@ public class TestPeriodicRLESparseResourceAllocation {
 
   @Test
   public void testMaxPeriodicCapacity() {
-    int[] alloc = { 2, 5, 7, 10, 3, 4, 6, 8};
+    int[] alloc = {2, 5, 7, 10, 3, 4, 6, 8};
     long[] timeSteps = {0L, 1L, 2L, 3L, 4L, 5L, 6L, 7L};
     RLESparseResourceAllocation rleSparseVector =
         generateAllocations(alloc, timeSteps);

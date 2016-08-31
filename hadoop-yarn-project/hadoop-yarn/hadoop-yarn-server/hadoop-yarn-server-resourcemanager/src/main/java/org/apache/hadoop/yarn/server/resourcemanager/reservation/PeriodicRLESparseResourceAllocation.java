@@ -28,7 +28,7 @@ import org.apache.hadoop.yarn.api.records.Resource;
 public class PeriodicRLESparseResourceAllocation {
 
   private RLESparseResourceAllocation rleVector;
-  long timePeriod;
+  private long timePeriod;
 
   public PeriodicRLESparseResourceAllocation(
       RLESparseResourceAllocation rleVector, Long timePeriod) {
@@ -103,6 +103,24 @@ public class PeriodicRLESparseResourceAllocation {
       maxResource = rleVector.getCapacityAtTime(tick % timePeriod);
     }
     return maxResource;
+  }
+
+  /**
+   * Get time period of PeriodicRLESparseResourceAllocation
+   *
+   * @return timePeriod time period represented in ms.
+   */
+  public long getTimePeriod() {
+    return this.timePeriod;
+  }
+
+  /**
+   * Set time period of PeriodicRLESparseResourceAllocation
+   *
+   * @param timePeriod time period represented in ms.
+   */
+  public void setTimePeriod(long period) {
+    this.timePeriod = period;
   }
 
   @Override

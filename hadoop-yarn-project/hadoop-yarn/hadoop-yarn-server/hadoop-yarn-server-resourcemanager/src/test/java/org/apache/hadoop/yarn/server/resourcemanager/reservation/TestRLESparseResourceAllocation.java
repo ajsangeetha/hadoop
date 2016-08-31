@@ -529,7 +529,7 @@ public class TestRLESparseResourceAllocation {
     ResourceCalculator resCalc = new DefaultResourceCalculator();
     RLESparseResourceAllocation rleSparseVector =
         new RLESparseResourceAllocation(resCalc);
-    int[] alloc = { 2, 5, 7, 10, 3, 4, 6, 8};
+    int[] alloc = {2, 5, 7, 10, 3, 4, 6, 8};
     int start = 0;
     Set<Entry<ReservationInterval, Resource>> inputs =
         generateAllocation(start, alloc, true).entrySet();
