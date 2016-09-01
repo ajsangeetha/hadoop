@@ -17,20 +17,17 @@
  *****************************************************************************/
 package org.apache.hadoop.yarn.server.resourcemanager.reservation;
 
-import static org.junit.Assert.assertEquals;
-
 import java.util.TreeMap;
 
 import org.apache.hadoop.yarn.api.records.Resource;
 import org.apache.hadoop.yarn.util.resource.DefaultResourceCalculator;
-import org.apache.hadoop.yarn.util.resource.ResourceCalculator;
 import org.junit.Assert;
 import org.junit.Test;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /**
- * Testing the class PeriodicRLESparseResourceAllocation
+ * Testing the class PeriodicRLESparseResourceAllocation.
  */
 public class TestPeriodicRLESparseResourceAllocation {
 

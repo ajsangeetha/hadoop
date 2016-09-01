@@ -106,7 +106,7 @@ public class PeriodicRLESparseResourceAllocation {
   }
 
   /**
-   * Get time period of PeriodicRLESparseResourceAllocation
+   * Get time period of PeriodicRLESparseResourceAllocation.
    *
    * @return timePeriod time period represented in ms.
    */
@@ -115,9 +115,9 @@ public class PeriodicRLESparseResourceAllocation {
   }
 
   /**
-   * Set time period of PeriodicRLESparseResourceAllocation
+   * Set time period of PeriodicRLESparseResourceAllocation.
    *
-   * @param timePeriod time period represented in ms.
+   * @param period time period represented in ms.
    */
   public void setTimePeriod(long period) {
     this.timePeriod = period;
