@@ -526,16 +526,10 @@ public class TestRLESparseResourceAllocation {
 
   @Test
   public void testMaxPeriodicCapacity() {
-    ResourceCalculator resCalc = new DefaultResourceCalculator();
-    RLESparseResourceAllocation rleSparseVector =
-        new RLESparseResourceAllocation(resCalc);
+    long[] timeSteps = {0L, 1L, 2L, 3L, 4L, 5L, 6L, 7L};
     int[] alloc = {2, 5, 7, 10, 3, 4, 6, 8};
-    int start = 0;
-    Set<Entry<ReservationInterval, Resource>> inputs =
-        generateAllocation(start, alloc, true).entrySet();
-    for (Entry<ReservationInterval, Resource> ip : inputs) {
-      rleSparseVector.addInterval(ip.getKey(), ip.getValue());
-    }
+    RLESparseResourceAllocation rleSparseVector =
+        generateAllocations(alloc, timeSteps);
     LOG.info(rleSparseVector.toString());
     Assert.assertEquals(
         rleSparseVector.getMaxPeriodicCapacity(0, 1),
@@ -567,6 +561,19 @@ public class TestRLESparseResourceAllocation {
     b.put(40L, Resource.newInstance(20, 20));
     b.put(42L, Resource.newInstance(20, 20));
     b.put(43L, Resource.newInstance(10, 10));
+  }
+
+  RLESparseResourceAllocation generateAllocations(int[] alloc,
+      long[] timeSteps) {
+    TreeMap<Long, Resource> allocationsMap = new TreeMap<>();
+    for (int i = 0; i < alloc.length; i++) {
+      allocationsMap.put(timeSteps[i],
+          Resource.newInstance(alloc[i], alloc[i]));
+    }
+    RLESparseResourceAllocation rleVector =
+        new RLESparseResourceAllocation(allocationsMap,
+            new DefaultResourceCalculator());
+    return rleVector;
   }
 
   private void validate(RLESparseResourceAllocation out, long[] time,
