@@ -18,10 +18,7 @@
 
 package org.apache.hadoop.yarn.server.resourcemanager.reservation;
 
-import java.util.TreeMap;
-
 import org.apache.hadoop.yarn.api.records.Resource;
-import org.apache.hadoop.yarn.util.resource.DefaultResourceCalculator;
 import org.junit.Assert;
 import org.junit.Test;
 import org.slf4j.Logger;
