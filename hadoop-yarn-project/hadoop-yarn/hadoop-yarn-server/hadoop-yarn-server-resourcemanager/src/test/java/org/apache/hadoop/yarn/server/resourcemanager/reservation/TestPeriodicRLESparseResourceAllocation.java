@@ -15,6 +15,7 @@
  *   See the License for the specific language governing permissions and
  *   limitations under the License.
  *****************************************************************************/
+
 package org.apache.hadoop.yarn.server.resourcemanager.reservation;
 
 import java.util.TreeMap;
@@ -56,7 +57,8 @@ public class TestPeriodicRLESparseResourceAllocation {
     int[] alloc = {2, 5, 7, 10, 3, 4, 6, 8};
     long[] timeSteps = {0L, 1L, 2L, 3L, 4L, 5L, 6L, 7L};
     RLESparseResourceAllocation rleSparseVector =
-        generateAllocations(alloc, timeSteps);
+        ReservationSystemTestUtil.generateRLESparseResourceAllocation(
+            alloc, timeSteps);
     PeriodicRLESparseResourceAllocation periodicVector =
         new PeriodicRLESparseResourceAllocation(rleSparseVector, 8L);
     LOG.info(periodicVector.toString());
@@ -77,17 +79,4 @@ public class TestPeriodicRLESparseResourceAllocation {
         Resource.newInstance(4, 4));
   }
 
-
-  RLESparseResourceAllocation generateAllocations(int[] alloc,
-                                                  long[] timeSteps) {
-    TreeMap<Long, Resource> allocationsMap = new TreeMap<>();
-    for (int i = 0; i < alloc.length; i++) {
-      allocationsMap.put(timeSteps[i],
-                         Resource.newInstance(alloc[i], alloc[i]));
-    }
-    RLESparseResourceAllocation rleVector =
-        new RLESparseResourceAllocation(allocationsMap,
-                                        new DefaultResourceCalculator());
-    return rleVector;
-  }
 }
