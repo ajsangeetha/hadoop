@@ -40,7 +40,8 @@ public class TestPeriodicRLESparseResourceAllocation {
     int[] alloc = {10, 7, 5, 2, 0};
     long[] timeSteps = {0L, 5L, 10L, 15L, 19L};
     RLESparseResourceAllocation rleSparseVector =
-        generateAllocations(alloc, timeSteps);
+        ReservationSystemTestUtil.generateRLESparseResourceAllocation(
+            alloc, timeSteps);
     PeriodicRLESparseResourceAllocation periodicVector =
         new PeriodicRLESparseResourceAllocation(rleSparseVector, 20L);
     LOG.info(periodicVector.toString());
