@@ -533,4 +533,26 @@ public class RLESparseResourceAllocation {
     add, subtract, min, max, subtractTestNonNegative
   }
 
+  /**
+   * Get the maximum capacity across specified time instances. The search-space
+   * is specified using the starting value, tick, and the periodic interval for
+   * search. Maximum resource allocation across tick, tick + period,
+   * tick + 2 * period,..., tick + n * period .. is returned.
+   *
+   * @param tick the starting time instance
+   * @param period interval at which capacity is evaluated
+   * @return maximum resource allocation
+   */
+  public Resource getMaxPeriodicCapacity(long tick, long period) {
+    Resource maxCapacity = ZERO_RESOURCE;
+    if (!cumulativeCapacity.isEmpty()) {
+      Long lastKey = cumulativeCapacity.lastKey();
+      for (long t = tick; t <= lastKey; t = t + period) {
+        maxCapacity = Resources.componentwiseMax(maxCapacity,
+            cumulativeCapacity.floorEntry(t).getValue());
+      }
+    }
+    return maxCapacity;
+  }
+
 }
