@@ -24,12 +24,13 @@ import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.ipc.RPC;
 import org.apache.hadoop.ipc.Server;
 import org.apache.hadoop.yarn.api.ApplicationMasterProtocolPB;
+import org.apache.hadoop.yarn.api.records.ApplicationAttemptId;
 import org.apache.hadoop.yarn.api.records.Container;
 import org.apache.hadoop.yarn.api.records.NodeId;
 import org.apache.hadoop.yarn.event.EventHandler;
+import org.apache.hadoop.yarn.security.AMRMTokenIdentifier;
 import org.apache.hadoop.yarn.server.api.DistributedSchedulingAMProtocol;
 import org.apache.hadoop.yarn.api.impl.pb.service.ApplicationMasterProtocolPBServiceImpl;
-
 
 import org.apache.hadoop.yarn.api.protocolrecords.AllocateRequest;
 import org.apache.hadoop.yarn.api.protocolrecords.AllocateResponse;
@@ -41,18 +42,20 @@ import org.apache.hadoop.yarn.api.protocolrecords.FinishApplicationMasterRespons
 import org.apache.hadoop.yarn.api.protocolrecords.RegisterApplicationMasterRequest;
 import org.apache.hadoop.yarn.api.protocolrecords.RegisterApplicationMasterResponse;
 
-import org.apache.hadoop.yarn.api.records.Resource;
 import org.apache.hadoop.yarn.conf.YarnConfiguration;
 import org.apache.hadoop.yarn.exceptions.YarnException;
 import org.apache.hadoop.yarn.ipc.YarnRPC;
 import org.apache.hadoop.yarn.proto.ApplicationMasterProtocol.ApplicationMasterProtocolService;
 
+import org.apache.hadoop.yarn.server.api.protocolrecords.RemoteNode;
 import org.apache.hadoop.yarn.server.resourcemanager.rmcontainer.RMContainer;
 import org.apache.hadoop.yarn.server.resourcemanager.rmcontainer.RMContainerEvent;
 import org.apache.hadoop.yarn.server.resourcemanager.rmcontainer.RMContainerEventType;
 import org.apache.hadoop.yarn.server.resourcemanager.rmcontainer.RMContainerImpl;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.AbstractYarnScheduler;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.SchedulerApplicationAttempt;
+import org.apache.hadoop.yarn.server.resourcemanager.scheduler.SchedulerNode;
+import org.apache.hadoop.yarn.server.resourcemanager.scheduler.SchedulerUtils;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.YarnScheduler;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.distributed.NodeQueueLoadMonitor;
 
@@ -65,17 +68,21 @@ import org.apache.hadoop.yarn.server.resourcemanager.scheduler.event.NodeUpdateS
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.event.SchedulerEvent;
 import org.apache.hadoop.yarn.server.resourcemanager.security.AMRMTokenSecretManager;
 
+import org.apache.hadoop.yarn.server.scheduler.OpportunisticContainerAllocator;
+import org.apache.hadoop.yarn.server.scheduler.OpportunisticContainerContext;
+import org.apache.hadoop.yarn.server.scheduler.SchedulerRequestKey;
+import org.apache.hadoop.yarn.server.utils.YarnServerSecurityUtils;
+
 import java.io.IOException;
 import java.net.InetSocketAddress;
-import java.util.HashSet;
+import java.util.ArrayList;
 import java.util.List;
-import java.util.Set;
-import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * The OpportunisticContainerAllocatorAMService is started instead of the
- * ApplicationMasterService if distributed scheduling is enabled for the YARN
- * cluster.
+ * ApplicationMasterService if opportunistic scheduling is enabled for the YARN
+ * cluster (either centralized or distributed opportunistic scheduling).
+ *
  * It extends the functionality of the ApplicationMasterService by servicing
  * clients (AMs and AMRMProxy request interceptors) that understand the
  * DistributedSchedulingProtocol.
@@ -88,37 +95,42 @@ public class OpportunisticContainerAllocatorAMService
       LogFactory.getLog(OpportunisticContainerAllocatorAMService.class);
 
   private final NodeQueueLoadMonitor nodeMonitor;
+  private final OpportunisticContainerAllocator oppContainerAllocator;
 
-  private final ConcurrentHashMap<String, Set<NodeId>> rackToNode =
-      new ConcurrentHashMap<>();
-  private final ConcurrentHashMap<String, Set<NodeId>> hostToNode =
-      new ConcurrentHashMap<>();
   private final int k;
+
+  private final long cacheRefreshInterval;
+  private volatile List<RemoteNode> cachedNodes;
+  private volatile long lastCacheUpdateTime;
 
   public OpportunisticContainerAllocatorAMService(RMContext rmContext,
       YarnScheduler scheduler) {
     super(OpportunisticContainerAllocatorAMService.class.getName(),
         rmContext, scheduler);
+    this.oppContainerAllocator = new OpportunisticContainerAllocator(
+        rmContext.getContainerTokenSecretManager());
     this.k = rmContext.getYarnConfiguration().getInt(
         YarnConfiguration.OPP_CONTAINER_ALLOCATION_NODES_NUMBER_USED,
-        YarnConfiguration.OPP_CONTAINER_ALLOCATION_NODES_NUMBER_USED_DEFAULT);
+        YarnConfiguration.DEFAULT_OPP_CONTAINER_ALLOCATION_NODES_NUMBER_USED);
     long nodeSortInterval = rmContext.getYarnConfiguration().getLong(
         YarnConfiguration.NM_CONTAINER_QUEUING_SORTING_NODES_INTERVAL_MS,
         YarnConfiguration.
-            NM_CONTAINER_QUEUING_SORTING_NODES_INTERVAL_MS_DEFAULT);
+            DEFAULT_NM_CONTAINER_QUEUING_SORTING_NODES_INTERVAL_MS);
+    this.cacheRefreshInterval = nodeSortInterval;
+    this.lastCacheUpdateTime = System.currentTimeMillis();
     NodeQueueLoadMonitor.LoadComparator comparator =
         NodeQueueLoadMonitor.LoadComparator.valueOf(
             rmContext.getYarnConfiguration().get(
                 YarnConfiguration.NM_CONTAINER_QUEUING_LOAD_COMPARATOR,
                 YarnConfiguration.
-                    NM_CONTAINER_QUEUING_LOAD_COMPARATOR_DEFAULT));
+                    DEFAULT_NM_CONTAINER_QUEUING_LOAD_COMPARATOR));
 
     NodeQueueLoadMonitor topKSelector =
         new NodeQueueLoadMonitor(nodeSortInterval, comparator);
 
     float sigma = rmContext.getYarnConfiguration()
         .getFloat(YarnConfiguration.NM_CONTAINER_QUEUING_LIMIT_STDEV,
-            YarnConfiguration.NM_CONTAINER_QUEUING_LIMIT_STDEV_DEFAULT);
+            YarnConfiguration.DEFAULT_NM_CONTAINER_QUEUING_LIMIT_STDEV);
 
     int limitMin, limitMax;
 
@@ -126,22 +138,22 @@ public class OpportunisticContainerAllocatorAMService
       limitMin = rmContext.getYarnConfiguration()
           .getInt(YarnConfiguration.NM_CONTAINER_QUEUING_MIN_QUEUE_LENGTH,
               YarnConfiguration.
-                  NM_CONTAINER_QUEUING_MIN_QUEUE_LENGTH_DEFAULT);
+                  DEFAULT_NM_CONTAINER_QUEUING_MIN_QUEUE_LENGTH);
       limitMax = rmContext.getYarnConfiguration()
           .getInt(YarnConfiguration.NM_CONTAINER_QUEUING_MAX_QUEUE_LENGTH,
               YarnConfiguration.
-                  NM_CONTAINER_QUEUING_MAX_QUEUE_LENGTH_DEFAULT);
+                  DEFAULT_NM_CONTAINER_QUEUING_MAX_QUEUE_LENGTH);
     } else {
       limitMin = rmContext.getYarnConfiguration()
           .getInt(
               YarnConfiguration.NM_CONTAINER_QUEUING_MIN_QUEUE_WAIT_TIME_MS,
               YarnConfiguration.
-                  NM_CONTAINER_QUEUING_MIN_QUEUE_WAIT_TIME_MS_DEFAULT);
+                  DEFAULT_NM_CONTAINER_QUEUING_MIN_QUEUE_WAIT_TIME_MS);
       limitMax = rmContext.getYarnConfiguration()
           .getInt(
               YarnConfiguration.NM_CONTAINER_QUEUING_MAX_QUEUE_WAIT_TIME_MS,
               YarnConfiguration.
-                  NM_CONTAINER_QUEUING_MAX_QUEUE_WAIT_TIME_MS_DEFAULT);
+                  DEFAULT_NM_CONTAINER_QUEUING_MAX_QUEUE_WAIT_TIME_MS);
     }
 
     topKSelector.initThresholdCalculator(sigma, limitMin, limitMax);
@@ -172,6 +184,28 @@ public class OpportunisticContainerAllocatorAMService
   public RegisterApplicationMasterResponse registerApplicationMaster
       (RegisterApplicationMasterRequest request) throws YarnException,
       IOException {
+    final ApplicationAttemptId appAttemptId = getAppAttemptId();
+    SchedulerApplicationAttempt appAttempt = ((AbstractYarnScheduler)
+        rmContext.getScheduler()).getApplicationAttempt(appAttemptId);
+    if (appAttempt.getOpportunisticContainerContext() == null) {
+      OpportunisticContainerContext opCtx = new OpportunisticContainerContext();
+      opCtx.setContainerIdGenerator(new OpportunisticContainerAllocator
+          .ContainerIdGenerator() {
+        @Override
+        public long generateContainerId() {
+          return appAttempt.getAppSchedulingInfo().getNewContainerId();
+        }
+      });
+      int tokenExpiryInterval = getConfig()
+          .getInt(YarnConfiguration.RM_CONTAINER_ALLOC_EXPIRY_INTERVAL_MS,
+              YarnConfiguration.DEFAULT_RM_CONTAINER_ALLOC_EXPIRY_INTERVAL_MS);
+      opCtx.updateAllocationParams(
+          rmContext.getScheduler().getMinimumResourceCapability(),
+          rmContext.getScheduler().getMaximumResourceCapability(),
+          rmContext.getScheduler().getMinimumResourceCapability(),
+          tokenExpiryInterval);
+      appAttempt.setOpportunisticContainerContext(opCtx);
+    }
     return super.registerApplicationMaster(request);
   }
 
@@ -183,14 +217,46 @@ public class OpportunisticContainerAllocatorAMService
   }
 
   @Override
-  public AllocateResponse allocate(AllocateRequest request) throws
-      YarnException, IOException {
-    return super.allocate(request);
+  protected void allocateInternal(ApplicationAttemptId appAttemptId,
+      AllocateRequest request, AllocateResponse allocateResponse)
+      throws YarnException {
+
+    // Partition requests to GUARANTEED and OPPORTUNISTIC.
+    OpportunisticContainerAllocator.PartitionedResourceRequests
+        partitionedAsks =
+        oppContainerAllocator.partitionAskList(request.getAskList());
+
+    // Allocate OPPORTUNISTIC containers.
+    SchedulerApplicationAttempt appAttempt =
+        ((AbstractYarnScheduler)rmContext.getScheduler())
+            .getApplicationAttempt(appAttemptId);
+
+    OpportunisticContainerContext oppCtx =
+        appAttempt.getOpportunisticContainerContext();
+    oppCtx.updateNodeList(getLeastLoadedNodes());
+
+    List<Container> oppContainers =
+        oppContainerAllocator.allocateContainers(
+            request.getResourceBlacklistRequest(),
+            partitionedAsks.getOpportunistic(), appAttemptId, oppCtx,
+            ResourceManager.getClusterTimeStamp(), appAttempt.getUser());
+
+    // Create RMContainers and update the NMTokens.
+    if (!oppContainers.isEmpty()) {
+      handleNewContainers(oppContainers, false);
+      appAttempt.updateNMTokens(oppContainers);
+      addToAllocatedContainers(allocateResponse, oppContainers);
+    }
+
+    // Allocate GUARANTEED containers.
+    request.setAskList(partitionedAsks.getGuaranteed());
+
+    super.allocateInternal(appAttemptId, request, allocateResponse);
   }
 
   @Override
   public RegisterDistributedSchedulingAMResponse
-  registerApplicationMasterForDistributedScheduling(
+      registerApplicationMasterForDistributedScheduling(
       RegisterApplicationMasterRequest request) throws YarnException,
       IOException {
     RegisterApplicationMasterResponse response =
@@ -199,49 +265,18 @@ public class OpportunisticContainerAllocatorAMService
         .newRecordInstance(RegisterDistributedSchedulingAMResponse.class);
     dsResp.setRegisterResponse(response);
     dsResp.setMinContainerResource(
-        Resource.newInstance(
-            getConfig().getInt(
-                YarnConfiguration.OPPORTUNISTIC_CONTAINERS_MIN_MEMORY_MB,
-                YarnConfiguration.
-                    OPPORTUNISTIC_CONTAINERS_MIN_MEMORY_MB_DEFAULT),
-            getConfig().getInt(
-                YarnConfiguration.OPPORTUNISTIC_CONTAINERS_MIN_VCORES,
-                YarnConfiguration.OPPORTUNISTIC_CONTAINERS_MIN_VCORES_DEFAULT)
-        )
-    );
+        rmContext.getScheduler().getMinimumResourceCapability());
     dsResp.setMaxContainerResource(
-        Resource.newInstance(
-            getConfig().getInt(
-                YarnConfiguration.OPPORTUNISTIC_CONTAINERS_MAX_MEMORY_MB,
-                YarnConfiguration
-                    .OPPORTUNISTIC_CONTAINERS_MAX_MEMORY_MB_DEFAULT),
-            getConfig().getInt(
-                YarnConfiguration.OPPORTUNISTIC_CONTAINERS_MAX_VCORES,
-                YarnConfiguration.OPPORTUNISTIC_CONTAINERS_MAX_VCORES_DEFAULT)
-        )
-    );
-    dsResp.setIncrContainerResource(
-        Resource.newInstance(
-            getConfig().getInt(
-                YarnConfiguration.OPPORTUNISTIC_CONTAINERS_INCR_MEMORY_MB,
-                YarnConfiguration.
-                    OPPORTUNISTIC_CONTAINERS_INCR_MEMORY_MB_DEFAULT),
-            getConfig().getInt(
-                YarnConfiguration.OPPORTUNISTIC_CONTAINERS_INCR_VCORES,
-                YarnConfiguration.OPPORTUNISTIC_CONTAINERS_INCR_VCORES_DEFAULT)
-        )
-    );
+        rmContext.getScheduler().getMaximumResourceCapability());
     dsResp.setContainerTokenExpiryInterval(
         getConfig().getInt(
-            YarnConfiguration.OPPORTUNISTIC_CONTAINERS_TOKEN_EXPIRY_MS,
-            YarnConfiguration.
-                OPPORTUNISTIC_CONTAINERS_TOKEN_EXPIRY_MS_DEFAULT));
+            YarnConfiguration.RM_CONTAINER_ALLOC_EXPIRY_INTERVAL_MS,
+            YarnConfiguration.DEFAULT_RM_CONTAINER_ALLOC_EXPIRY_INTERVAL_MS));
     dsResp.setContainerIdStart(
         this.rmContext.getEpoch() << ResourceManager.EPOCH_BIT_SHIFT);
 
     // Set nodes to be used for scheduling
-    dsResp.setNodesForScheduling(
-        this.nodeMonitor.selectLeastLoadedNodes(this.k));
+    dsResp.setNodesForScheduling(getLeastLoadedNodes());
     return dsResp;
   }
 
@@ -250,46 +285,25 @@ public class OpportunisticContainerAllocatorAMService
       DistributedSchedulingAllocateRequest request)
       throws YarnException, IOException {
     List<Container> distAllocContainers = request.getAllocatedContainers();
-    for (Container container : distAllocContainers) {
-      // Create RMContainer
-      SchedulerApplicationAttempt appAttempt =
-          ((AbstractYarnScheduler) rmContext.getScheduler())
-              .getCurrentAttemptForContainer(container.getId());
-      RMContainer rmContainer = new RMContainerImpl(container,
-          appAttempt.getApplicationAttemptId(), container.getNodeId(),
-          appAttempt.getUser(), rmContext, true);
-      appAttempt.addRMContainer(container.getId(), rmContainer);
-      rmContainer.handle(
-          new RMContainerEvent(container.getId(),
-              RMContainerEventType.LAUNCHED));
-    }
+    handleNewContainers(distAllocContainers, true);
     AllocateResponse response = allocate(request.getAllocateRequest());
     DistributedSchedulingAllocateResponse dsResp = recordFactory
         .newRecordInstance(DistributedSchedulingAllocateResponse.class);
     dsResp.setAllocateResponse(response);
-    dsResp.setNodesForScheduling(
-        this.nodeMonitor.selectLeastLoadedNodes(this.k));
+    dsResp.setNodesForScheduling(getLeastLoadedNodes());
     return dsResp;
   }
 
-  private void addToMapping(ConcurrentHashMap<String, Set<NodeId>> mapping,
-                            String rackName, NodeId nodeId) {
-    if (rackName != null) {
-      mapping.putIfAbsent(rackName, new HashSet<NodeId>());
-      Set<NodeId> nodeIds = mapping.get(rackName);
-      synchronized (nodeIds) {
-        nodeIds.add(nodeId);
-      }
-    }
-  }
-
-  private void removeFromMapping(ConcurrentHashMap<String, Set<NodeId>> mapping,
-                                 String rackName, NodeId nodeId) {
-    if (rackName != null) {
-      Set<NodeId> nodeIds = mapping.get(rackName);
-      synchronized (nodeIds) {
-        nodeIds.remove(nodeId);
-      }
+  private void handleNewContainers(List<Container> allocContainers,
+      boolean isRemotelyAllocated) {
+    for (Container container : allocContainers) {
+      // Create RMContainer
+      RMContainer rmContainer =
+          SchedulerUtils.createOpportunisticRmContainer(
+              rmContext, container, isRemotelyAllocated);
+      rmContainer.handle(
+          new RMContainerEvent(container.getId(),
+              RMContainerEventType.ACQUIRED));
     }
   }
 
@@ -303,10 +317,6 @@ public class OpportunisticContainerAllocatorAMService
       NodeAddedSchedulerEvent nodeAddedEvent = (NodeAddedSchedulerEvent) event;
       nodeMonitor.addNode(nodeAddedEvent.getContainerReports(),
           nodeAddedEvent.getAddedRMNode());
-      addToMapping(rackToNode, nodeAddedEvent.getAddedRMNode().getRackName(),
-          nodeAddedEvent.getAddedRMNode().getNodeID());
-      addToMapping(hostToNode, nodeAddedEvent.getAddedRMNode().getHostName(),
-          nodeAddedEvent.getAddedRMNode().getNodeID());
       break;
     case NODE_REMOVED:
       if (!(event instanceof NodeRemovedSchedulerEvent)) {
@@ -315,12 +325,6 @@ public class OpportunisticContainerAllocatorAMService
       NodeRemovedSchedulerEvent nodeRemovedEvent =
           (NodeRemovedSchedulerEvent) event;
       nodeMonitor.removeNode(nodeRemovedEvent.getRemovedRMNode());
-      removeFromMapping(rackToNode,
-          nodeRemovedEvent.getRemovedRMNode().getRackName(),
-          nodeRemovedEvent.getRemovedRMNode().getNodeID());
-      removeFromMapping(hostToNode,
-          nodeRemovedEvent.getRemovedRMNode().getHostName(),
-          nodeRemovedEvent.getRemovedRMNode().getNodeID());
       break;
     case NODE_UPDATE:
       if (!(event instanceof NodeUpdateSchedulerEvent)) {
@@ -363,5 +367,44 @@ public class OpportunisticContainerAllocatorAMService
 
   public QueueLimitCalculator getNodeManagerQueueLimitCalculator() {
     return nodeMonitor.getThresholdCalculator();
+  }
+
+  private synchronized List<RemoteNode> getLeastLoadedNodes() {
+    long currTime = System.currentTimeMillis();
+    if ((currTime - lastCacheUpdateTime > cacheRefreshInterval)
+        || (cachedNodes == null)) {
+      cachedNodes = convertToRemoteNodes(
+          this.nodeMonitor.selectLeastLoadedNodes(this.k));
+      if (cachedNodes.size() > 0) {
+        lastCacheUpdateTime = currTime;
+      }
+    }
+    return cachedNodes;
+  }
+
+  private List<RemoteNode> convertToRemoteNodes(List<NodeId> nodeIds) {
+    ArrayList<RemoteNode> retNodes = new ArrayList<>();
+    for (NodeId nId : nodeIds) {
+      RemoteNode remoteNode = convertToRemoteNode(nId);
+      if (null != remoteNode) {
+        retNodes.add(remoteNode);
+      }
+    }
+    return retNodes;
+  }
+
+  private RemoteNode convertToRemoteNode(NodeId nodeId) {
+    SchedulerNode node =
+        ((AbstractYarnScheduler) rmContext.getScheduler()).getNode(nodeId);
+    return node != null ? RemoteNode.newInstance(nodeId, node.getHttpAddress())
+        : null;
+  }
+
+  private static ApplicationAttemptId getAppAttemptId() throws YarnException {
+    AMRMTokenIdentifier amrmTokenIdentifier =
+        YarnServerSecurityUtils.authorizeRequest();
+    ApplicationAttemptId applicationAttemptId =
+        amrmTokenIdentifier.getApplicationAttemptId();
+    return applicationAttemptId;
   }
 }

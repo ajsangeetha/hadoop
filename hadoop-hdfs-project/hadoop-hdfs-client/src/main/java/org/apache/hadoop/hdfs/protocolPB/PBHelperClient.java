@@ -60,6 +60,7 @@ import org.apache.hadoop.hdfs.inotify.EventBatch;
 import org.apache.hadoop.hdfs.inotify.EventBatchList;
 import org.apache.hadoop.hdfs.protocol.Block;
 import org.apache.hadoop.hdfs.protocol.BlockStoragePolicy;
+import org.apache.hadoop.hdfs.protocol.BlockType;
 import org.apache.hadoop.hdfs.protocol.CacheDirectiveEntry;
 import org.apache.hadoop.hdfs.protocol.CacheDirectiveInfo;
 import org.apache.hadoop.hdfs.protocol.CacheDirectiveStats;
@@ -70,6 +71,7 @@ import org.apache.hadoop.hdfs.protocol.ClientProtocol;
 import org.apache.hadoop.hdfs.protocol.CorruptFileBlocks;
 import org.apache.hadoop.hdfs.protocol.DatanodeID;
 import org.apache.hadoop.hdfs.protocol.DatanodeInfo;
+import org.apache.hadoop.hdfs.protocol.DatanodeInfo.DatanodeInfoBuilder;
 import org.apache.hadoop.hdfs.protocol.DatanodeInfo.AdminStates;
 import org.apache.hadoop.hdfs.protocol.DatanodeLocalInfo;
 import org.apache.hadoop.hdfs.protocol.DirectoryListing;
@@ -119,8 +121,11 @@ import org.apache.hadoop.hdfs.protocol.proto.DataTransferProtos.ShortCircuitShmI
 import org.apache.hadoop.hdfs.protocol.proto.DataTransferProtos.ShortCircuitShmSlotProto;
 import org.apache.hadoop.hdfs.protocol.proto.EncryptionZonesProtos.EncryptionZoneProto;
 import org.apache.hadoop.hdfs.protocol.proto.HdfsProtos;
+import org.apache.hadoop.hdfs.protocol.proto.HdfsProtos.AccessModeProto;
 import org.apache.hadoop.hdfs.protocol.proto.HdfsProtos.BlockProto;
 import org.apache.hadoop.hdfs.protocol.proto.HdfsProtos.BlockStoragePolicyProto;
+import org.apache.hadoop.hdfs.protocol.proto.HdfsProtos.BlockTypeProto;
+import org.apache.hadoop.hdfs.protocol.proto.HdfsProtos.BlockTokenSecretProto;
 import org.apache.hadoop.hdfs.protocol.proto.HdfsProtos.ContentSummaryProto;
 import org.apache.hadoop.hdfs.protocol.proto.HdfsProtos.CorruptFileBlocksProto;
 import org.apache.hadoop.hdfs.protocol.proto.HdfsProtos.CryptoProtocolVersionProto;
@@ -289,6 +294,7 @@ public class PBHelperClient {
         .setId(convert((DatanodeID) info))
         .setCapacity(info.getCapacity())
         .setDfsUsed(info.getDfsUsed())
+        .setNonDfsUsed(info.getNonDfsUsed())
         .setRemaining(info.getRemaining())
         .setBlockPoolUsed(info.getBlockPoolUsed())
         .setCacheCapacity(info.getCacheCapacity())
@@ -297,6 +303,8 @@ public class PBHelperClient {
         .setLastUpdateMonotonic(info.getLastUpdateMonotonic())
         .setXceiverCount(info.getXceiverCount())
         .setAdminState(convert(info.getAdminState()))
+        .setLastBlockReportTime(info.getLastBlockReportTime())
+        .setLastBlockReportMonotonic(info.getLastBlockReportMonotonic())
         .build();
     return builder.build();
   }
@@ -580,16 +588,83 @@ public class PBHelperClient {
     return blockTokens;
   }
 
+  public static AccessModeProto convert(BlockTokenIdentifier.AccessMode aMode) {
+    switch (aMode) {
+    case READ: return AccessModeProto.READ;
+    case WRITE: return AccessModeProto.WRITE;
+    case COPY: return AccessModeProto.COPY;
+    case REPLACE: return AccessModeProto.REPLACE;
+    default:
+      throw new IllegalArgumentException("Unexpected AccessMode: " + aMode);
+    }
+  }
+
+  public static BlockTokenIdentifier.AccessMode convert(
+      AccessModeProto accessModeProto) {
+    switch (accessModeProto) {
+    case READ: return BlockTokenIdentifier.AccessMode.READ;
+    case WRITE: return BlockTokenIdentifier.AccessMode.WRITE;
+    case COPY: return BlockTokenIdentifier.AccessMode.COPY;
+    case REPLACE: return BlockTokenIdentifier.AccessMode.REPLACE;
+    default:
+      throw new IllegalArgumentException("Unexpected AccessModeProto: " +
+          accessModeProto);
+    }
+  }
+
+  public static BlockTokenSecretProto convert(
+      BlockTokenIdentifier blockTokenSecret) {
+    BlockTokenSecretProto.Builder builder =
+        BlockTokenSecretProto.newBuilder();
+    builder.setExpiryDate(blockTokenSecret.getExpiryDate());
+    builder.setKeyId(blockTokenSecret.getKeyId());
+    String userId = blockTokenSecret.getUserId();
+    if (userId != null) {
+      builder.setUserId(userId);
+    }
+
+    String blockPoolId = blockTokenSecret.getBlockPoolId();
+    if (blockPoolId != null) {
+      builder.setBlockPoolId(blockPoolId);
+    }
+
+    builder.setBlockId(blockTokenSecret.getBlockId());
+
+    for (BlockTokenIdentifier.AccessMode aMode :
+        blockTokenSecret.getAccessModes()) {
+      builder.addModes(convert(aMode));
+    }
+    return builder.build();
+  }
+
   static public DatanodeInfo convert(DatanodeInfoProto di) {
-    if (di == null) return null;
-    return new DatanodeInfo(
-        convert(di.getId()),
-        di.hasLocation() ? di.getLocation() : null,
-        di.getCapacity(),  di.getDfsUsed(),  di.getRemaining(),
-        di.getBlockPoolUsed(), di.getCacheCapacity(), di.getCacheUsed(),
-        di.getLastUpdate(), di.getLastUpdateMonotonic(),
-        di.getXceiverCount(), convert(di.getAdminState()),
-        di.hasUpgradeDomain() ? di.getUpgradeDomain() : null);
+    if (di == null) {
+      return null;
+    }
+    DatanodeInfoBuilder dinfo =
+        new DatanodeInfoBuilder().setNodeID(convert(di.getId()))
+            .setNetworkLocation(di.hasLocation() ? di.getLocation() : null)
+            .setCapacity(di.getCapacity()).setDfsUsed(di.getDfsUsed())
+            .setRemaining(di.getRemaining())
+            .setBlockPoolUsed(di.getBlockPoolUsed())
+            .setCacheCapacity(di.getCacheCapacity())
+            .setCacheUsed(di.getCacheUsed()).setLastUpdate(di.getLastUpdate())
+            .setLastUpdateMonotonic(di.getLastUpdateMonotonic())
+            .setXceiverCount(di.getXceiverCount())
+            .setAdminState(convert(di.getAdminState())).setUpgradeDomain(
+            di.hasUpgradeDomain() ? di.getUpgradeDomain() : null)
+            .setLastBlockReportTime(di.hasLastBlockReportTime() ?
+                di.getLastBlockReportTime() : 0)
+            .setLastBlockReportMonotonic(di.hasLastBlockReportMonotonic() ?
+                di.getLastBlockReportMonotonic() : 0);
+    if (di.hasNonDfsUsed()) {
+      dinfo.setNonDfsUsed(di.getNonDfsUsed());
+    } else {
+      // use the legacy way for older datanodes
+      long nonDFSUsed = di.getCapacity() - di.getDfsUsed() - di.getRemaining();
+      dinfo.setNonDfsUsed(nonDFSUsed < 0 ? 0 : nonDFSUsed);
+    }
+    return dinfo.build();
   }
 
   public static StorageType[] convertStorageTypes(
@@ -1556,12 +1631,12 @@ public class PBHelperClient {
   }
 
   public static StorageReport convert(StorageReportProto p) {
-    return new StorageReport(
-        p.hasStorage() ?
-            convert(p.getStorage()) :
-            new DatanodeStorage(p.getStorageUuid()),
-        p.getFailed(), p.getCapacity(), p.getDfsUsed(), p.getRemaining(),
-        p.getBlockPoolUsed());
+    long nonDfsUsed = p.hasNonDfsUsed() ? p.getNonDfsUsed() : p.getCapacity()
+        - p.getDfsUsed() - p.getRemaining();
+    return new StorageReport(p.hasStorage() ? convert(p.getStorage())
+        : new DatanodeStorage(p.getStorageUuid()), p.getFailed(),
+        p.getCapacity(), p.getDfsUsed(), p.getRemaining(),
+        p.getBlockPoolUsed(), nonDfsUsed);
   }
 
   public static DatanodeStorage convert(DatanodeStorageProto s) {
@@ -1757,6 +1832,24 @@ public class PBHelperClient {
 
   public static Block convert(BlockProto b) {
     return new Block(b.getBlockId(), b.getNumBytes(), b.getGenStamp());
+  }
+
+  public static BlockTypeProto convert(BlockType blockType) {
+    switch (blockType) {
+    case CONTIGUOUS: return BlockTypeProto.CONTIGUOUS;
+    case STRIPED: return BlockTypeProto.STRIPED;
+    default:
+      throw new IllegalArgumentException("Unexpected block type: " + blockType);
+    }
+  }
+
+  public static BlockType convert(BlockTypeProto blockType) {
+    switch (blockType.getNumber()) {
+    case BlockTypeProto.CONTIGUOUS_VALUE: return BlockType.CONTIGUOUS;
+    case BlockTypeProto.STRIPED_VALUE: return BlockType.STRIPED;
+    default:
+      throw new IllegalArgumentException("Unexpected block type: " + blockType);
+    }
   }
 
   static public DatanodeInfo[] convert(DatanodeInfoProto di[]) {
@@ -2136,7 +2229,8 @@ public class PBHelperClient {
         .setBlockPoolUsed(r.getBlockPoolUsed()).setCapacity(r.getCapacity())
         .setDfsUsed(r.getDfsUsed()).setRemaining(r.getRemaining())
         .setStorageUuid(r.getStorage().getStorageID())
-        .setStorage(convert(r.getStorage()));
+        .setStorage(convert(r.getStorage()))
+        .setNonDfsUsed(r.getNonDfsUsed());
     return builder.build();
   }
 

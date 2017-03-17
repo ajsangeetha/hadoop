@@ -71,8 +71,8 @@ function parse_args()
 function calculate_classpath
 {
   hadoop_add_to_classpath_tools hadoop-sls
-  hadoop_debug "Injecting ${HADOOP_TOOLS_DIR}/sls/html into CLASSPATH"
-  hadoop_add_classpath "${HADOOP_TOOLS_DIR}/sls/html"
+  hadoop_debug "Injecting ${HADOOP_TOOLS_HOME}/${HADOOP_TOOLS_DIR}/sls/html into CLASSPATH"
+  hadoop_add_classpath "${HADOOP_TOOLS_HOME}/${HADOOP_TOOLS_DIR}/sls/html"
 }
 
 function run_simulation() {
@@ -96,20 +96,23 @@ function run_simulation() {
     hadoop_add_param args -printsimulation "-printsimulation"
   fi
 
-  hadoop_debug "Appending HADOOP_CLIENT_OPTS onto HADOOP_OPTS"
-  HADOOP_OPTS="${HADOOP_OPTS} ${HADOOP_CLIENT_OPTS}"
+  hadoop_add_client_opts
 
   hadoop_finalize
   # shellcheck disable=SC2086
   hadoop_java_exec sls org.apache.hadoop.yarn.sls.SLSRunner ${args}
 }
 
+this="${BASH_SOURCE-$0}"
+bin=$(cd -P -- "$(dirname -- "${this}")" >/dev/null && pwd -P)
+
+# copy 'html' directory to current directory to make sure web sever can access
+cp -r "${bin}/../html" "$(pwd)"
+
 # let's locate libexec...
 if [[ -n "${HADOOP_HOME}" ]]; then
   HADOOP_DEFAULT_LIBEXEC_DIR="${HADOOP_HOME}/libexec"
 else
-  this="${BASH_SOURCE-$0}"
-  bin=$(cd -P -- "$(dirname -- "${this}")" >/dev/null && pwd -P)
   HADOOP_DEFAULT_LIBEXEC_DIR="${bin}/../../../../../libexec"
 fi
 

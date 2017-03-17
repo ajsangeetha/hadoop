@@ -77,6 +77,7 @@ import org.apache.hadoop.yarn.server.nodemanager.containermanager.container.Cont
 import org.apache.hadoop.yarn.server.nodemanager.containermanager.container.ContainerState;
 import org.apache.hadoop.yarn.server.nodemanager.containermanager.localizer.ContainerLocalizer;
 import org.apache.hadoop.yarn.server.nodemanager.containermanager.localizer.ResourceLocalizationService;
+import org.apache.hadoop.yarn.server.nodemanager.executor.ContainerPrepareContext;
 import org.apache.hadoop.yarn.server.nodemanager.executor.ContainerSignalContext;
 import org.apache.hadoop.yarn.server.nodemanager.executor.ContainerStartContext;
 import org.apache.hadoop.yarn.server.nodemanager.util.ProcessIdFileReader;
@@ -104,9 +105,10 @@ public class ContainerLaunch implements Callable<Integer> {
   private final Context context;
   private final ContainerManagerImpl containerManager;
   
-  protected AtomicBoolean shouldLaunchContainer = new AtomicBoolean(false);
+  protected AtomicBoolean containerAlreadyLaunched = new AtomicBoolean(false);
   protected AtomicBoolean completed = new AtomicBoolean(false);
 
+  private volatile boolean killedBeforeStart = false;
   private long sleepDelayBeforeSigKill = 250;
   private long maxKillWaitTime = 2000;
 
@@ -197,18 +199,14 @@ public class ContainerLaunch implements Callable<Integer> {
 
       FileContext lfs = FileContext.getLocalFSFileContext();
 
-      Path nmPrivateContainerScriptPath =
-          dirsHandler.getLocalPathForWrite(
+      Path nmPrivateContainerScriptPath = dirsHandler.getLocalPathForWrite(
               getContainerPrivateDir(appIdStr, containerIdStr) + Path.SEPARATOR
                   + CONTAINER_SCRIPT);
-      Path nmPrivateTokensPath =
-          dirsHandler.getLocalPathForWrite(
-              getContainerPrivateDir(appIdStr, containerIdStr)
-                  + Path.SEPARATOR
+      Path nmPrivateTokensPath = dirsHandler.getLocalPathForWrite(
+              getContainerPrivateDir(appIdStr, containerIdStr) + Path.SEPARATOR
                   + String.format(ContainerLocalizer.TOKEN_FILE_NAME_FMT,
                       containerIdStr));
-      Path nmPrivateClasspathJarDir = 
-          dirsHandler.getLocalPathForWrite(
+      Path nmPrivateClasspathJarDir = dirsHandler.getLocalPathForWrite(
               getContainerPrivateDir(appIdStr, containerIdStr));
       DataOutputStream containerScriptOutStream = null;
       DataOutputStream tokensOutStream = null;
@@ -223,7 +221,6 @@ public class ContainerLaunch implements Callable<Integer> {
       recordContainerWorkDir(containerID, containerWorkDir.toString());
 
       String pidFileSubpath = getPidFileSubpath(appIdStr, containerIdStr);
-
       // pid file should be in nm private dir so that it is not 
       // accessible by users
       pidFilePath = dirsHandler.getLocalPathForWrite(pidFileSubpath);
@@ -239,11 +236,9 @@ public class ContainerLaunch implements Callable<Integer> {
         throw new IOException("Most of the disks failed. "
             + dirsHandler.getDisksHealthReport(false));
       }
-
       try {
         // /////////// Write out the container-script in the nmPrivate space.
         List<Path> appDirs = new ArrayList<Path>(localDirs.size());
-
         for (String localDir : localDirs) {
           Path usersdir = new Path(localDir, ContainerLocalizer.USERCACHE);
           Path userdir = new Path(usersdir, user);
@@ -257,18 +252,22 @@ public class ContainerLaunch implements Callable<Integer> {
         // Set the token location too.
         environment.put(
             ApplicationConstants.CONTAINER_TOKEN_FILE_ENV_NAME, 
-            new Path(containerWorkDir, 
+            new Path(containerWorkDir,
                 FINAL_CONTAINER_TOKENS_FILE).toUri().getPath());
         // Sanitize the container's environment
         sanitizeEnv(environment, containerWorkDir, appDirs, userLocalDirs,
-            containerLogDirs,
-          localResources, nmPrivateClasspathJarDir);
+            containerLogDirs, localResources, nmPrivateClasspathJarDir);
 
+        exec.prepareContainer(new ContainerPrepareContext.Builder()
+            .setContainer(container)
+            .setLocalizedResources(localResources)
+            .setUser(user)
+            .setContainerLocalDirs(containerLocalDirs)
+            .setCommands(launchContext.getCommands()).build());
         // Write out the environment
         exec.writeLaunchEnv(containerScriptOutStream, environment,
           localResources, launchContext.getCommands(),
             new Path(containerLogDirs.get(0)), user);
-
         // /////////// End of writing out container-script
 
         // /////////// Write out the container-tokens in the nmPrivate space.
@@ -294,8 +293,7 @@ public class ContainerLaunch implements Callable<Integer> {
           .setFilecacheDirs(filecacheDirs)
           .setUserLocalDirs(userLocalDirs)
           .setContainerLocalDirs(containerLocalDirs)
-          .setContainerLogDirs(containerLogDirs)
-          .build());
+          .setContainerLogDirs(containerLogDirs).build());
     } catch (Throwable e) {
       LOG.warn("Failed to launch container.", e);
       dispatcher.getEventHandler().handle(new ContainerExitEvent(
@@ -307,7 +305,6 @@ public class ContainerLaunch implements Callable<Integer> {
     }
 
     handleContainerExitCode(ret, containerLogDir);
-
     return ret;
   }
 
@@ -401,7 +398,12 @@ public class ContainerLaunch implements Callable<Integer> {
   @SuppressWarnings("unchecked")
   protected int launchContainer(ContainerStartContext ctx) throws IOException {
     ContainerId containerId = container.getContainerId();
-
+    if (container.isMarkedForKilling()) {
+      LOG.info("Container " + containerId + " not launched as it has already "
+          + "been marked for Killing");
+      this.killedBeforeStart = true;
+      return ExitCode.TERMINATED.getExitCode();
+    }
     // LaunchContainer is a blocking call. We are here almost means the
     // container is launched, so send out the event.
     dispatcher.getEventHandler().handle(new ContainerEvent(
@@ -410,7 +412,7 @@ public class ContainerLaunch implements Callable<Integer> {
     context.getNMStateStore().storeContainerLaunched(containerId);
 
     // Check if the container is signalled to be killed.
-    if (!shouldLaunchContainer.compareAndSet(false, true)) {
+    if (!containerAlreadyLaunched.compareAndSet(false, true)) {
       LOG.info("Container " + containerId + " not launched as "
           + "cleanup already called");
       return ExitCode.TERMINATED.getExitCode();
@@ -451,10 +453,14 @@ public class ContainerLaunch implements Callable<Integer> {
         || exitCode == ExitCode.TERMINATED.getExitCode()) {
       // If the process was killed, Send container_cleanedup_after_kill and
       // just break out of this method.
-      dispatcher.getEventHandler().handle(
-          new ContainerExitEvent(containerId,
-              ContainerEventType.CONTAINER_KILLED_ON_REQUEST, exitCode,
-              diagnosticInfo.toString()));
+
+      // If Container was killed before starting... NO need to do this.
+      if (!killedBeforeStart) {
+        dispatcher.getEventHandler().handle(
+            new ContainerExitEvent(containerId,
+                ContainerEventType.CONTAINER_KILLED_ON_REQUEST, exitCode,
+                diagnosticInfo.toString()));
+      }
     } else if (exitCode != 0) {
       handleContainerExitWithFailure(containerId, exitCode, containerLogDir,
           diagnosticInfo);
@@ -565,14 +571,16 @@ public class ContainerLaunch implements Callable<Integer> {
     }
 
     // launch flag will be set to true if process already launched
-    boolean alreadyLaunched = !shouldLaunchContainer.compareAndSet(false, true);
+    boolean alreadyLaunched =
+        !containerAlreadyLaunched.compareAndSet(false, true);
     if (!alreadyLaunched) {
       LOG.info("Container " + containerIdStr + " not launched."
           + " No cleanup needed to be done");
       return;
     }
-
-    LOG.debug("Marking container " + containerIdStr + " as inactive");
+    if (LOG.isDebugEnabled()) {
+      LOG.debug("Marking container " + containerIdStr + " as inactive");
+    }
     // this should ensure that if the container process has not launched 
     // by this time, it will never be launched
     exec.deactivateContainer(containerId);
@@ -596,10 +604,10 @@ public class ContainerLaunch implements Callable<Integer> {
       // kill process
       if (processId != null) {
         String user = container.getUser();
-        LOG.debug("Sending signal to pid " + processId
-            + " as user " + user
-            + " for container " + containerIdStr);
-
+        if (LOG.isDebugEnabled()) {
+          LOG.debug("Sending signal to pid " + processId + " as user " + user
+              + " for container " + containerIdStr);
+        }
         final Signal signal = sleepDelayBeforeSigKill > 0
           ? Signal.TERM
           : Signal.KILL;
@@ -611,12 +619,11 @@ public class ContainerLaunch implements Callable<Integer> {
                 .setPid(processId)
                 .setSignal(signal)
                 .build());
-
-        LOG.debug("Sent signal " + signal + " to pid " + processId
-          + " as user " + user
-          + " for container " + containerIdStr
-          + ", result=" + (result? "success" : "failed"));
-
+        if (LOG.isDebugEnabled()) {
+          LOG.debug("Sent signal " + signal + " to pid " + processId
+              + " as user " + user + " for container " + containerIdStr
+              + ", result=" + (result ? "success" : "failed"));
+        }
         if (sleepDelayBeforeSigKill > 0) {
           new DelayedProcessKiller(container, user,
               processId, sleepDelayBeforeSigKill, Signal.KILL, exec).start();
@@ -660,7 +667,8 @@ public class ContainerLaunch implements Callable<Integer> {
 
     LOG.info("Sending signal " + command + " to container " + containerIdStr);
 
-    boolean alreadyLaunched = !shouldLaunchContainer.compareAndSet(false, true);
+    boolean alreadyLaunched =
+        !containerAlreadyLaunched.compareAndSet(false, true);
     if (!alreadyLaunched) {
       LOG.info("Container " + containerIdStr + " not launched."
           + " Not sending the signal");
@@ -744,8 +752,10 @@ public class ContainerLaunch implements Callable<Integer> {
     String containerIdStr = 
         container.getContainerId().toString();
     String processId = null;
-    LOG.debug("Accessing pid for container " + containerIdStr
-        + " from pid file " + pidFilePath);
+    if (LOG.isDebugEnabled()) {
+      LOG.debug("Accessing pid for container " + containerIdStr
+          + " from pid file " + pidFilePath);
+    }
     int sleepCounter = 0;
     final int sleepInterval = 100;
 
@@ -754,8 +764,10 @@ public class ContainerLaunch implements Callable<Integer> {
     while (true) {
       processId = ProcessIdFileReader.getProcessId(pidFilePath);
       if (processId != null) {
-        LOG.debug("Got pid " + processId + " for container "
-            + containerIdStr);
+        if (LOG.isDebugEnabled()) {
+          LOG.debug(
+              "Got pid " + processId + " for container " + containerIdStr);
+        }
         break;
       }
       else if ((sleepCounter*sleepInterval) > maxKillWaitTime) {
@@ -1201,16 +1213,16 @@ public class ContainerLaunch implements Callable<Integer> {
 
   private void recordContainerLogDir(ContainerId containerId,
       String logDir) throws IOException{
+    container.setLogDir(logDir);
     if (container.isRetryContextSet()) {
-      container.setLogDir(logDir);
       context.getNMStateStore().storeContainerLogDir(containerId, logDir);
     }
   }
 
   private void recordContainerWorkDir(ContainerId containerId,
       String workDir) throws IOException{
+    container.setWorkDir(workDir);
     if (container.isRetryContextSet()) {
-      container.setWorkDir(workDir);
       context.getNMStateStore().storeContainerWorkDir(containerId, workDir);
     }
   }

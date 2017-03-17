@@ -41,6 +41,7 @@ import org.apache.hadoop.fs.FSDataInputStream;
 import org.apache.hadoop.fs.FSDataOutputStream;
 import org.apache.hadoop.fs.FSLinkResolver;
 import org.apache.hadoop.fs.FileChecksum;
+import org.apache.hadoop.fs.FileEncryptionInfo;
 import org.apache.hadoop.fs.FileStatus;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.FileSystemLinkResolver;
@@ -1598,7 +1599,7 @@ public class DistributedFileSystem extends FileSystem {
 
   /**
    * Requests the namenode to tell all datanodes to use a new, non-persistent
-   * bandwidth value for dfs.balance.bandwidthPerSec.
+   * bandwidth value for dfs.datanode.balance.bandwidthPerSec.
    * The bandwidth parameter is the max number of bytes per second of network
    * bandwidth to be used by a datanode during balancing.
    *
@@ -2204,6 +2205,35 @@ public class DistributedFileSystem extends FileSystem {
     return dfs.listEncryptionZones();
   }
 
+  /* HDFS only */
+  public FileEncryptionInfo getFileEncryptionInfo(final Path path)
+      throws IOException {
+    Path absF = fixRelativePart(path);
+    return new FileSystemLinkResolver<FileEncryptionInfo>() {
+      @Override
+      public FileEncryptionInfo doCall(final Path p) throws IOException {
+        final HdfsFileStatus fi = dfs.getFileInfo(getPathName(p));
+        if (fi == null) {
+          throw new FileNotFoundException("File does not exist: " + p);
+        }
+        return fi.getFileEncryptionInfo();
+      }
+
+      @Override
+      public FileEncryptionInfo next(final FileSystem fs, final Path p)
+          throws IOException {
+        if (fs instanceof DistributedFileSystem) {
+          DistributedFileSystem myDfs = (DistributedFileSystem)fs;
+          return myDfs.getFileEncryptionInfo(p);
+        }
+        throw new UnsupportedOperationException(
+            "Cannot call getFileEncryptionInfo"
+                + " on a symlink to a non-DistributedFileSystem: " + path
+                + " -> " + p);
+      }
+    }.resolve(this, absF);
+  }
+
   @Override
   public void setXAttr(Path path, final String name, final byte[] value,
       final EnumSet<XAttrSetFlag> flag) throws IOException {
@@ -2367,17 +2397,18 @@ public class DistributedFileSystem extends FileSystem {
    * Set the source path to the specified erasure coding policy.
    *
    * @param path     The directory to set the policy
-   * @param ecPolicy The erasure coding policy. If not specified default will
-   *                 be used.
+   * @param ecPolicyName The erasure coding policy name.
    * @throws IOException
    */
   public void setErasureCodingPolicy(final Path path,
-      final ErasureCodingPolicy ecPolicy) throws IOException {
+      final String ecPolicyName) throws IOException {
     Path absF = fixRelativePart(path);
+    Preconditions.checkNotNull(ecPolicyName, "Erasure coding policy cannot be" +
+        " null.");
     new FileSystemLinkResolver<Void>() {
       @Override
       public Void doCall(final Path p) throws IOException {
-        dfs.setErasureCodingPolicy(getPathName(p), ecPolicy);
+        dfs.setErasureCodingPolicy(getPathName(p), ecPolicyName);
         return null;
       }
 
@@ -2385,7 +2416,7 @@ public class DistributedFileSystem extends FileSystem {
       public Void next(final FileSystem fs, final Path p) throws IOException {
         if (fs instanceof DistributedFileSystem) {
           DistributedFileSystem myDfs = (DistributedFileSystem) fs;
-          myDfs.setErasureCodingPolicy(p, ecPolicy);
+          myDfs.setErasureCodingPolicy(p, ecPolicyName);
           return null;
         }
         throw new UnsupportedOperationException(
@@ -2438,6 +2469,35 @@ public class DistributedFileSystem extends FileSystem {
   }
 
   /**
+   * Unset the erasure coding policy from the source path.
+   *
+   * @param path     The directory to unset the policy
+   * @throws IOException
+   */
+  public void unsetErasureCodingPolicy(final Path path) throws IOException {
+    Path absF = fixRelativePart(path);
+    new FileSystemLinkResolver<Void>() {
+      @Override
+      public Void doCall(final Path p) throws IOException {
+        dfs.unsetErasureCodingPolicy(getPathName(p));
+        return null;
+      }
+
+      @Override
+      public Void next(final FileSystem fs, final Path p) throws IOException {
+        if (fs instanceof DistributedFileSystem) {
+          DistributedFileSystem myDfs = (DistributedFileSystem) fs;
+          myDfs.unsetErasureCodingPolicy(p);
+          return null;
+        }
+        throw new UnsupportedOperationException(
+            "Cannot unsetErasureCodingPolicy through a symlink to a "
+                + "non-DistributedFileSystem: " + path + " -> " + p);
+      }
+    }.resolve(this, absF);
+  }
+
+  /**
    * Get the root directory of Trash for a path in HDFS.
    * 1. File in encryption zone returns /ez1/.Trash/username
    * 2. File not in encryption zone, or encountered exception when checking
@@ -2448,11 +2508,12 @@ public class DistributedFileSystem extends FileSystem {
    */
   @Override
   public Path getTrashRoot(Path path) {
-    if ((path == null) || path.isRoot() || !dfs.isHDFSEncryptionEnabled()) {
+    if ((path == null) || !dfs.isHDFSEncryptionEnabled()) {
       return super.getTrashRoot(path);
     }
 
-    String parentSrc = path.getParent().toUri().getPath();
+    String parentSrc = path.isRoot()?
+        path.toUri().getPath():path.getParent().toUri().getPath();
     try {
       EncryptionZone ez = dfs.getEZForPath(parentSrc);
       if ((ez != null)) {
@@ -2499,8 +2560,9 @@ public class DistributedFileSystem extends FileSystem {
         } else {
           Path userTrash = new Path(ezTrashRoot, System.getProperty(
               "user.name"));
-          if (exists(userTrash)) {
+          try {
             ret.add(getFileStatus(userTrash));
+          } catch (FileNotFoundException ignored) {
           }
         }
       }

@@ -15,14 +15,7 @@
 HDFS NFS Gateway
 ================
 
-* [HDFS NFS Gateway](#HDFS_NFS_Gateway)
-    * [Overview](#Overview)
-    * [Configuration](#Configuration)
-    * [Start and stop NFS gateway service](#Start_and_stop_NFS_gateway_service)
-    * [Verify validity of NFS related services](#Verify_validity_of_NFS_related_services)
-    * [Mount the export "/"](#Mount_the_export_)
-    * [Allow mounts from unprivileged clients](#Allow_mounts_from_unprivileged_clients)
-    * [User authentication and mapping](#User_authentication_and_mapping)
+<!-- MACRO{toc|fromDepth=0|toDepth=3} -->
 
 Overview
 --------
@@ -148,7 +141,7 @@ It's strongly recommended for the users to update a few configuration properties
     characters. The machine name format can be a single host, a "*", a Java regular expression, or an IPv4 address. The access
     privilege uses rw or ro to specify read/write or read-only access of the machines to exports. If the access privilege is not provided, the default is read-only. Entries are separated by ";".
     For example: "192.168.0.0/22 rw ; \\\\w\*\\\\.example\\\\.com ; host1.test.org ro;". Only the NFS gateway needs to restart after
-    this property is updated. Note that, here Java regular expression is differnt with the regrulation expression used in 
+    this property is updated. Note that, here Java regular expression is different with the regulation expression used in
     Linux NFS export table, such as, using "\\\\w\*\\\\.example\\\\.com" instead of "\*.example.com", "192\\\\.168\\\\.0\\\\.(11|22)"
     instead of "192.168.0.[11|22]" and so on.  
 
@@ -183,7 +176,7 @@ It's strongly recommended for the users to update a few configuration properties
         </property>
 
 *   JVM and log settings. You can export JVM settings (e.g., heap size and GC log) in
-    HADOOP\_NFS3\_OPTS. More NFS related settings can be found in hadoop-env.sh.
+    HDFS\_NFS3\_OPTS. More NFS related settings can be found in hadoop-env.sh.
     To get NFS debug trace, you can edit the log4j.property file
     to add the following. Note, debug trace, especially for ONCRPC, can be very verbose.
 

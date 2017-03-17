@@ -19,9 +19,11 @@
 package org.apache.hadoop.yarn.server.resourcemanager;
 
 import static org.mockito.Matchers.any;
+import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
 
 import java.io.File;
 import java.io.FileOutputStream;
@@ -76,6 +78,8 @@ import org.apache.hadoop.yarn.server.resourcemanager.rmnode.RMNodeStatusEvent;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.QueueMetrics;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.event.SchedulerEvent;
 import org.apache.hadoop.yarn.server.timelineservice.collector.PerNodeTimelineCollectorsAuxService;
+import org.apache.hadoop.yarn.server.timelineservice.storage.FileSystemTimelineWriterImpl;
+import org.apache.hadoop.yarn.server.timelineservice.storage.TimelineWriter;
 import org.apache.hadoop.yarn.server.utils.BuilderUtils;
 import org.apache.hadoop.yarn.util.Records;
 import org.apache.hadoop.yarn.util.YarnVersionInfo;
@@ -299,6 +303,8 @@ public class TestResourceTrackerService extends NodeLabelTestBase {
     RMApp app = rm.submitApp(2000);
     MockAM am = MockRM.launchAndRegisterAM(app, rm, nm1);
     ApplicationAttemptId aaid = app.getCurrentAppAttempt().getAppAttemptId();
+    nm1.nodeHeartbeat(aaid, 2, ContainerState.RUNNING);
+    nm3.nodeHeartbeat(true);
 
     // Graceful decommission host1 and host3
     writeToHostsFile("host1", "host3");
@@ -308,7 +314,7 @@ public class TestResourceTrackerService extends NodeLabelTestBase {
 
     // host1 should be DECOMMISSIONING due to running containers.
     // host3 should become DECOMMISSIONED.
-    nm1.nodeHeartbeat(aaid, 2, ContainerState.RUNNING);
+    nm1.nodeHeartbeat(true);
     nm3.nodeHeartbeat(true);
     rm.waitForState(id1, NodeState.DECOMMISSIONING);
     rm.waitForState(id3, NodeState.DECOMMISSIONED);
@@ -987,6 +993,8 @@ public class TestResourceTrackerService extends NodeLabelTestBase {
     conf.set(YarnConfiguration.NM_AUX_SERVICES + "."
         + "timeline_collector" + ".class",
         PerNodeTimelineCollectorsAuxService.class.getName());
+    conf.setClass(YarnConfiguration.TIMELINE_SERVICE_WRITER_CLASS,
+        FileSystemTimelineWriterImpl.class, TimelineWriter.class);
 
     rm = new MockRM(conf);
     rm.start();
@@ -1999,6 +2007,59 @@ public class TestResourceTrackerService extends NodeLabelTestBase {
     MetricsSystem ms = DefaultMetricsSystem.instance();
     if (ms.getSource("ClusterMetrics") != null) {
       DefaultMetricsSystem.shutdown();
+    }
+  }
+
+  @Test(timeout = 60000)
+  public void testNodeHeartBeatResponseForUnknownContainerCleanUp()
+      throws Exception {
+    Configuration conf = new Configuration();
+    rm = new MockRM(conf);
+    rm.init(conf);
+    rm.start();
+
+    MockNM nm1 = rm.registerNode("host1:1234", 5120);
+    rm.drainEvents();
+
+    // send 1st heartbeat
+    nm1.nodeHeartbeat(true);
+
+    // Create 2 unknown containers tracked by NM
+    ApplicationId applicationId = BuilderUtils.newApplicationId(1, 1);
+    ApplicationAttemptId applicationAttemptId = BuilderUtils
+        .newApplicationAttemptId(applicationId, 1);
+    ContainerId cid1 = BuilderUtils.newContainerId(applicationAttemptId, 2);
+    ContainerId cid2 = BuilderUtils.newContainerId(applicationAttemptId, 3);
+    ArrayList<ContainerStatus> containerStats =
+        new ArrayList<ContainerStatus>();
+    containerStats.add(
+        ContainerStatus.newInstance(cid1, ContainerState.COMPLETE, "", -1));
+    containerStats.add(
+        ContainerStatus.newInstance(cid2, ContainerState.COMPLETE, "", -1));
+
+    Map<ApplicationId, List<ContainerStatus>> conts =
+        new HashMap<ApplicationId, List<ContainerStatus>>();
+    conts.put(applicationAttemptId.getApplicationId(), containerStats);
+
+    // add RMApp into context.
+    RMApp app1 = mock(RMApp.class);
+    when(app1.getApplicationId()).thenReturn(applicationId);
+    rm.getRMContext().getRMApps().put(applicationId, app1);
+
+    // Send unknown container status in heartbeat
+    nm1.nodeHeartbeat(conts, true);
+    rm.drainEvents();
+
+    int containersToBeRemovedFromNM = 0;
+    while (true) {
+      NodeHeartbeatResponse nodeHeartbeat = nm1.nodeHeartbeat(true);
+      rm.drainEvents();
+      containersToBeRemovedFromNM +=
+          nodeHeartbeat.getContainersToBeRemovedFromNM().size();
+      // asserting for 2 since two unknown containers status has been sent
+      if (containersToBeRemovedFromNM == 2) {
+        break;
+      }
     }
   }
 }

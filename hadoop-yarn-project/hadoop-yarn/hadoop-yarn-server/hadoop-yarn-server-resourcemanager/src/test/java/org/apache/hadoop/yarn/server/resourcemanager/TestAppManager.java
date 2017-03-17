@@ -38,9 +38,11 @@ import java.util.concurrent.ConcurrentMap;
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.fs.CommonConfigurationKeysPublic;
 import org.apache.hadoop.io.DataOutputBuffer;
 import org.apache.hadoop.security.AccessControlException;
 import org.apache.hadoop.security.Credentials;
+import org.apache.hadoop.security.UserGroupInformation;
 import org.apache.hadoop.service.Service;
 import org.apache.hadoop.yarn.MockApps;
 import org.apache.hadoop.yarn.api.protocolrecords.SubmitApplicationRequest;
@@ -80,6 +82,7 @@ import org.apache.hadoop.yarn.server.security.ApplicationACLsManager;
 import org.apache.hadoop.yarn.util.Records;
 import org.apache.hadoop.yarn.util.resource.ResourceCalculator;
 import org.apache.hadoop.yarn.util.resource.Resources;
+import static org.apache.hadoop.yarn.server.resourcemanager.scheduler.capacity.CapacitySchedulerConfiguration.PREFIX;
 import org.junit.After;
 import org.junit.Assert;
 import org.junit.Before;
@@ -250,6 +253,7 @@ public class TestAppManager{
     asContext.setApplicationId(appId);
     asContext.setAMContainerSpec(mockContainerLaunchContext(recordFactory));
     asContext.setResource(mockResource());
+    asContext.setPriority(Priority.newInstance(0));
     setupDispatcher(rmContext, conf);
   }
 
@@ -257,6 +261,7 @@ public class TestAppManager{
   public void tearDown() {
     setAppEventType(RMAppEventType.KILL);
     ((Service)rmContext.getDispatcher()).stop();
+    UserGroupInformation.reset();
   }
 
   @Test
@@ -291,12 +296,11 @@ public class TestAppManager{
     YarnConfiguration conf = new YarnConfiguration();
     conf.set(YarnConfiguration.RM_SCHEDULER,
         CapacityScheduler.class.getCanonicalName());
-    conf.set("yarn.scheduler.capacity.root.acl_submit_applications", " ");
-    conf.set("yarn.scheduler.capacity.root.acl_administer_queue", " ");
+    conf.set(PREFIX + "root.acl_submit_applications", " ");
+    conf.set(PREFIX + "root.acl_administer_queue", " ");
 
-    conf.set("yarn.scheduler.capacity.root.default.acl_submit_applications",
-        " ");
-    conf.set("yarn.scheduler.capacity.root.default.acl_administer_queue", " ");
+    conf.set(PREFIX + "root.default.acl_submit_applications", " ");
+    conf.set(PREFIX + "root.default.acl_administer_queue", " ");
     conf.set(YarnConfiguration.YARN_ACL_ENABLE, "true");
     MockRM mockRM = new MockRM(conf);
     ClientRMService rmService = mockRM.getClientRMService();
@@ -310,13 +314,15 @@ public class TestAppManager{
             ResourceRequest.ANY, Resource.newInstance(1024, 1), 1);
     sub.setAMContainerResourceRequest(resReg);
     req.setApplicationSubmissionContext(sub);
+    sub.setAMContainerSpec(mock(ContainerLaunchContext.class));
     try {
       rmService.submitApplication(req);
     } catch (Exception e) {
+      e.printStackTrace();
       if (e instanceof YarnException) {
         Assert.assertTrue(e.getCause() instanceof AccessControlException);
       } else {
-        Assert.fail("Yarn exception is expected");
+        Assert.fail("Yarn exception is expected : " + e.getMessage());
       }
     } finally {
       mockRM.close();
@@ -542,6 +548,10 @@ public class TestAppManager{
     DataOutputBuffer dob = new DataOutputBuffer();
     ByteBuffer securityTokens = ByteBuffer.wrap(dob.getData(), 0,
         dob.getLength());
+    Configuration conf = new Configuration();
+    conf.set(CommonConfigurationKeysPublic.HADOOP_SECURITY_AUTHENTICATION,
+        "kerberos");
+    UserGroupInformation.setConfiguration(conf);
     asContext.getAMContainerSpec().setTokens(securityTokens);
     try {
       appMonitor.submitApplication(asContext, "test");
@@ -560,36 +570,6 @@ public class TestAppManager{
     }
     Assert.assertEquals("app event type sent is wrong",
         RMAppEventType.APP_REJECTED, getAppEventType());
-    asContext.getAMContainerSpec().setTokens(null);
-  }
-
-  @Test
-  public void testRMAppSubmitWithValidTokens() throws Exception {
-    // Setup valid security tokens
-    DataOutputBuffer dob = new DataOutputBuffer();
-    Credentials credentials = new Credentials();
-    credentials.writeTokenStorageToStream(dob);
-    ByteBuffer securityTokens = ByteBuffer.wrap(dob.getData(), 0,
-        dob.getLength());
-    asContext.getAMContainerSpec().setTokens(securityTokens);
-    appMonitor.submitApplication(asContext, "test");
-    RMApp app = rmContext.getRMApps().get(appId);
-    Assert.assertNotNull("app is null", app);
-    Assert.assertEquals("app id doesn't match", appId,
-        app.getApplicationId());
-    Assert.assertEquals("app state doesn't match", RMAppState.NEW,
-        app.getState());
-    verify(metricsPublisher).appACLsUpdated(
-        any(RMApp.class), any(String.class), anyLong());
-
-    // wait for event to be processed
-    int timeoutSecs = 0;
-    while ((getAppEventType() == RMAppEventType.KILL) &&
-        timeoutSecs++ < 20) {
-      Thread.sleep(1000);
-    }
-    Assert.assertEquals("app event type sent is wrong", RMAppEventType.START,
-        getAppEventType());
     asContext.getAMContainerSpec().setTokens(null);
   }
 
@@ -689,7 +669,8 @@ public class TestAppManager{
     when(app.getState()).thenReturn(RMAppState.RUNNING);
     when(app.getApplicationType()).thenReturn("MAPREDUCE");
     RMAppMetrics metrics =
-        new RMAppMetrics(Resource.newInstance(1234, 56), 10, 1, 16384, 64);
+        new RMAppMetrics(Resource.newInstance(1234, 56),
+            10, 1, 16384, 64, 0, 0);
     when(app.getRMAppMetrics()).thenReturn(metrics);
 
     RMAppManager.ApplicationSummary.SummaryBuilder summary =

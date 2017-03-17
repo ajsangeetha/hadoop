@@ -159,9 +159,7 @@ public class TestRecovery {
     app.waitForState(task1Attempt1, TaskAttemptState.RUNNING);
     app.waitForState(task2Attempt, TaskAttemptState.RUNNING);
     
-    // reduces must be in NEW state
-    Assert.assertEquals("Reduce Task state not correct",
-        TaskState.RUNNING, reduceTask.getReport().getTaskState());
+    app.waitForState(reduceTask, TaskState.RUNNING);
 
     /////////// Play some games with the TaskAttempts of the first task //////
     //send the fail signal to the 1st map task attempt
@@ -577,6 +575,72 @@ public class TestRecovery {
 
     app.waitForState(job, JobState.SUCCEEDED);
     app.verifyCompleted();
+  }
+
+  @Test
+  public void testRecoveryWithSpillEncryption() throws Exception {
+    int runCount = 0;
+    MRApp app = new MRAppWithHistory(1, 1, false, this.getClass().getName(),
+        true, ++runCount) {
+    };
+    Configuration conf = new Configuration();
+    conf.setBoolean(MRJobConfig.MR_AM_JOB_RECOVERY_ENABLE, true);
+    conf.setBoolean("mapred.mapper.new-api", true);
+    conf.setBoolean("mapred.reducer.new-api", true);
+    conf.setBoolean(MRJobConfig.JOB_UBERTASK_ENABLE, false);
+    conf.set(FileOutputFormat.OUTDIR, outputDir.toString());
+    conf.setBoolean(MRJobConfig.MR_ENCRYPTED_INTERMEDIATE_DATA, true);
+
+    // run the MR job at the first attempt
+    Job jobAttempt1 = app.submit(conf);
+    app.waitForState(jobAttempt1, JobState.RUNNING);
+
+    Iterator<Task> tasks = jobAttempt1.getTasks().values().iterator();
+
+    // finish the map task but the reduce task
+    Task mapper = tasks.next();
+    app.waitForState(mapper, TaskState.RUNNING);
+    TaskAttempt mapAttempt = mapper.getAttempts().values().iterator().next();
+    app.waitForState(mapAttempt, TaskAttemptState.RUNNING);
+    app.getContext().getEventHandler().handle(
+        new TaskAttemptEvent(mapAttempt.getID(), TaskAttemptEventType.TA_DONE));
+    app.waitForState(mapper, TaskState.SUCCEEDED);
+
+    // crash the first attempt of the MR job
+    app.stop();
+
+    // run the MR job again at the second attempt
+    app = new MRAppWithHistory(1, 1, false, this.getClass().getName(), false,
+        ++runCount);
+    Job jobAttempt2 = app.submit(conf);
+    Assert.assertTrue("Recovery from previous job attempt is processed even " +
+        "though intermediate data encryption is enabled.", !app.recovered());
+
+    // The map task succeeded from previous job attempt will not be recovered
+    // because the data spill encryption is enabled.
+    // Let's finish the job at the second attempt and verify its completion.
+    app.waitForState(jobAttempt2, JobState.RUNNING);
+    tasks = jobAttempt2.getTasks().values().iterator();
+    mapper = tasks.next();
+    Task reducer = tasks.next();
+
+    // finish the map task first
+    app.waitForState(mapper, TaskState.RUNNING);
+    mapAttempt = mapper.getAttempts().values().iterator().next();
+    app.waitForState(mapAttempt, TaskAttemptState.RUNNING);
+    app.getContext().getEventHandler().handle(
+        new TaskAttemptEvent(mapAttempt.getID(), TaskAttemptEventType.TA_DONE));
+    app.waitForState(mapper, TaskState.SUCCEEDED);
+
+    // then finish the reduce task
+    TaskAttempt redAttempt = reducer.getAttempts().values().iterator().next();
+    app.waitForState(redAttempt, TaskAttemptState.RUNNING);
+    app.getContext().getEventHandler().handle(
+        new TaskAttemptEvent(redAttempt.getID(), TaskAttemptEventType.TA_DONE));
+    app.waitForState(reducer, TaskState.SUCCEEDED);
+
+    // verify that the job succeeds at the 2rd attempt
+    app.waitForState(jobAttempt2, JobState.SUCCEEDED);
   }
 
   /**
@@ -1235,9 +1299,7 @@ public class TestRecovery {
     app.waitForState(task1Attempt2, TaskAttemptState.RUNNING);
     app.waitForState(task2Attempt, TaskAttemptState.RUNNING);
 
-    // reduces must be in NEW state
-    Assert.assertEquals("Reduce Task state not correct",
-        TaskState.RUNNING, reduceTask.getReport().getTaskState());
+    app.waitForState(reduceTask, TaskState.RUNNING);
 
     //send the done signal to the map 1 attempt 1
     app.getContext().getEventHandler().handle(
@@ -1365,9 +1427,7 @@ public class TestRecovery {
     app.waitForState(task1Attempt, TaskAttemptState.RUNNING);
     app.waitForState(task2Attempt, TaskAttemptState.RUNNING);
 
-    // reduces must be in NEW state
-    Assert.assertEquals("Reduce Task state not correct",
-        TaskState.RUNNING, reduceTask.getReport().getTaskState());
+    app.waitForState(reduceTask, TaskState.RUNNING);
 
     //send the done signal to the 1st map attempt
     app.getContext().getEventHandler().handle(

@@ -25,6 +25,7 @@ import org.apache.hadoop.fs.permission.PermissionStatus;
 import org.apache.hadoop.hdfs.DFSUtil;
 import org.apache.hadoop.hdfs.protocol.HdfsFileStatus;
 import org.apache.hadoop.hdfs.protocol.QuotaExceededException;
+import org.apache.hadoop.hdfs.server.namenode.FSDirectory.DirOp;
 
 import java.io.IOException;
 
@@ -55,10 +56,10 @@ class FSDirSymlinkOp {
     INodesInPath iip;
     fsd.writeLock();
     try {
-      iip = fsd.resolvePathForWrite(pc, link, false);
+      iip = fsd.resolvePath(pc, link, DirOp.WRITE_LINK);
       link = iip.getPath();
       if (!createParent) {
-        fsd.verifyParentDir(iip, link);
+        fsd.verifyParentDir(iip);
       }
       if (!fsd.isValidToCreate(link, iip)) {
         throw new IOException(
@@ -88,7 +89,8 @@ class FSDirSymlinkOp {
     final INodeSymlink symlink = new INodeSymlink(id, null, perm, mtime, atime,
         target);
     symlink.setLocalName(localName);
-    return fsd.addINode(iip, symlink) != null ? symlink : null;
+    return fsd.addINode(iip, symlink, perm.getPermission()) != null ?
+        symlink : null;
   }
 
   /**

@@ -15,19 +15,7 @@
 Archival Storage, SSD & Memory
 ==============================
 
-* [Archival Storage, SSD & Memory](#Archival_Storage_SSD__Memory)
-    * [Introduction](#Introduction)
-    * [Storage Types and Storage Policies](#Storage_Types_and_Storage_Policies)
-        * [Storage Types: ARCHIVE, DISK, SSD and RAM\_DISK](#Storage_Types:_ARCHIVE_DISK_SSD_and_RAM_DISK)
-        * [Storage Policies: Hot, Warm, Cold, All\_SSD, One\_SSD and Lazy\_Persist](#Storage_Policies:_Hot_Warm_Cold_All_SSD_One_SSD_and_Lazy_Persist)
-        * [Storage Policy Resolution](#Storage_Policy_Resolution)
-        * [Configuration](#Configuration)
-    * [Mover - A New Data Migration Tool](#Mover_-_A_New_Data_Migration_Tool)
-    * [Storage Policy Commands](#Storage_Policy_Commands)
-        * [List Storage Policies](#List_Storage_Policies)
-        * [Set Storage Policy](#Set_Storage_Policy)
-        * [Unset Storage Policy](#Unset_Storage_Policy)
-        * [Get Storage Policy](#Get_Storage_Policy)
+<!-- MACRO{toc|fromDepth=0|toDepth=3} -->
 
 Introduction
 ------------
@@ -89,7 +77,7 @@ Note 2: For the erasure coded files with striping layout, the suitable storage p
 
 When a file or directory is created, its storage policy is *unspecified*. The storage policy can be specified using the "[`storagepolicies -setStoragePolicy`](#Set_Storage_Policy)" command. The effective storage policy of a file or directory is resolved by the following rules.
 
-1.  If the file or directory is specificed with a storage policy, return it.
+1.  If the file or directory is specified with a storage policy, return it.
 
 2.  For an unspecified file or directory, if it is the root directory, return the *default storage policy*. Otherwise, return its parent's effective storage policy.
 

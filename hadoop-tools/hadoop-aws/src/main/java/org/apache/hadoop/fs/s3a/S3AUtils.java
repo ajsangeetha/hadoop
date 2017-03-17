@@ -25,6 +25,9 @@ import com.amazonaws.auth.EnvironmentVariableCredentialsProvider;
 import com.amazonaws.auth.InstanceProfileCredentialsProvider;
 import com.amazonaws.services.s3.model.AmazonS3Exception;
 import com.amazonaws.services.s3.model.S3ObjectSummary;
+
+import com.google.common.base.Preconditions;
+
 import org.apache.commons.lang.StringUtils;
 import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.classification.InterfaceStability;
@@ -32,20 +35,26 @@ import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.fs.s3native.S3xLoginHelper;
 import org.apache.hadoop.security.ProviderUtils;
+
+import com.google.common.collect.Lists;
 import org.slf4j.Logger;
 
 import java.io.EOFException;
 import java.io.FileNotFoundException;
 import java.io.IOException;
+import java.io.InterruptedIOException;
+import java.lang.reflect.Constructor;
+import java.lang.reflect.Method;
+import java.lang.reflect.Modifier;
 import java.net.URI;
 import java.nio.file.AccessDeniedException;
+import java.util.Collection;
 import java.util.Date;
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ExecutionException;
 
-import static org.apache.hadoop.fs.s3a.Constants.ACCESS_KEY;
-import static org.apache.hadoop.fs.s3a.Constants.AWS_CREDENTIALS_PROVIDER;
-import static org.apache.hadoop.fs.s3a.Constants.SECRET_KEY;
+import static org.apache.hadoop.fs.s3a.Constants.*;
 
 /**
  * Utility methods for S3A code.
@@ -61,6 +70,16 @@ public final class S3AUtils {
       = "instantiation exception";
   static final String NOT_AWS_PROVIDER =
       "does not implement AWSCredentialsProvider";
+  static final String ABSTRACT_PROVIDER =
+      "is abstract and therefore cannot be created";
+  static final String ENDPOINT_KEY = "Endpoint";
+
+  /**
+   * Core property for provider path. Duplicated here for consistent
+   * code across Hadoop version: {@value}.
+   */
+  static final String CREDENTIAL_PROVIDER_PATH =
+      "hadoop.security.credential.provider.path";
 
   private S3AUtils() {
   }
@@ -102,6 +121,10 @@ public final class S3AUtils {
         path != null ? (" on " + path) : "",
         exception);
     if (!(exception instanceof AmazonServiceException)) {
+      if (containsInterruptedException(exception)) {
+        return (IOException)new InterruptedIOException(message)
+            .initCause(exception);
+      }
       return new AWSClientIOException(message, exception);
     } else {
 
@@ -114,6 +137,21 @@ public final class S3AUtils {
       int status = ase.getStatusCode();
       switch (status) {
 
+      case 301:
+        if (s3Exception != null) {
+          if (s3Exception.getAdditionalDetails() != null &&
+              s3Exception.getAdditionalDetails().containsKey(ENDPOINT_KEY)) {
+            message = String.format("Received permanent redirect response to "
+                + "endpoint %s.  This likely indicates that the S3 endpoint "
+                + "configured in %s does not match the AWS region containing "
+                + "the bucket.",
+                s3Exception.getAdditionalDetails().get(ENDPOINT_KEY), ENDPOINT);
+          }
+          ioe = new AWSS3IOException(message, s3Exception);
+        } else {
+          ioe = new AWSServiceIOException(message, ase);
+        }
+        break;
       // permissions
       case 401:
       case 403:
@@ -169,6 +207,24 @@ public final class S3AUtils {
   }
 
   /**
+   * Recurse down the exception loop looking for any inner details about
+   * an interrupted exception.
+   * @param thrown exception thrown
+   * @return true if down the execution chain the operation was an interrupt
+   */
+  static boolean containsInterruptedException(Throwable thrown) {
+    if (thrown == null) {
+      return false;
+    }
+    if (thrown instanceof InterruptedException ||
+        thrown instanceof InterruptedIOException) {
+      return true;
+    }
+    // tail recurse
+    return containsInterruptedException(thrown.getCause());
+  }
+
+  /**
    * Get low level details of an amazon exception for logging; multi-line.
    * @param e exception
    * @return string details
@@ -215,17 +271,19 @@ public final class S3AUtils {
    * @param keyPath path to entry
    * @param summary summary from AWS
    * @param blockSize block size to declare.
+   * @param owner owner of the file
    * @return a status entry
    */
   public static S3AFileStatus createFileStatus(Path keyPath,
       S3ObjectSummary summary,
-      long blockSize) {
+      long blockSize,
+      String owner) {
     if (objectRepresentsDirectory(summary.getKey(), summary.getSize())) {
-      return new S3AFileStatus(true, true, keyPath);
+      return new S3AFileStatus(true, keyPath, owner);
     } else {
       return new S3AFileStatus(summary.getSize(),
           dateToLong(summary.getLastModified()), keyPath,
-          blockSize);
+          blockSize, owner);
     }
   }
 
@@ -284,9 +342,15 @@ public final class S3AUtils {
       credentials.add(new BasicAWSCredentialsProvider(
               creds.getUser(), creds.getPassword()));
       credentials.add(new EnvironmentVariableCredentialsProvider());
-      credentials.add(new InstanceProfileCredentialsProvider());
+      credentials.add(
+          SharedInstanceProfileCredentialsProvider.getInstance());
     } else {
       for (Class<?> aClass : awsClasses) {
+        if (aClass == InstanceProfileCredentialsProvider.class) {
+          LOG.debug("Found {}, but will use {} instead.", aClass.getName(),
+              SharedInstanceProfileCredentialsProvider.class.getName());
+          aClass = SharedInstanceProfileCredentialsProvider.class;
+        }
         credentials.add(createAWSCredentialProvider(conf,
             aClass,
             fsURI));
@@ -296,7 +360,19 @@ public final class S3AUtils {
   }
 
   /**
-   * Create an AWS credential provider.
+   * Create an AWS credential provider from its class by using reflection.  The
+   * class must implement one of the following means of construction, which are
+   * attempted in order:
+   *
+   * <ol>
+   * <li>a public constructor accepting java.net.URI and
+   *     org.apache.hadoop.conf.Configuration</li>
+   * <li>a public static method named getInstance that accepts no
+   *    arguments and returns an instance of
+   *    com.amazonaws.auth.AWSCredentialsProvider, or</li>
+   * <li>a public default constructor.</li>
+   * </ol>
+   *
    * @param conf configuration
    * @param credClass credential class
    * @param uri URI of the FS
@@ -307,32 +383,54 @@ public final class S3AUtils {
       Configuration conf,
       Class<?> credClass,
       URI uri) throws IOException {
-    AWSCredentialsProvider credentials;
+    AWSCredentialsProvider credentials = null;
     String className = credClass.getName();
     if (!AWSCredentialsProvider.class.isAssignableFrom(credClass)) {
       throw new IOException("Class " + credClass + " " + NOT_AWS_PROVIDER);
     }
-    try {
-      LOG.debug("Credential provider class is {}", className);
-      try {
-        credentials =
-            (AWSCredentialsProvider) credClass.getDeclaredConstructor(
-                URI.class, Configuration.class).newInstance(uri, conf);
-      } catch (NoSuchMethodException | SecurityException e) {
-        credentials =
-            (AWSCredentialsProvider) credClass.getDeclaredConstructor()
-                .newInstance();
-      }
-    } catch (NoSuchMethodException | SecurityException e) {
-      throw new IOException(String.format("%s " + CONSTRUCTOR_EXCEPTION
-          +".  A class specified in %s must provide an accessible constructor "
-          + "accepting URI and Configuration, or an accessible default "
-          + "constructor.", className, AWS_CREDENTIALS_PROVIDER), e);
-    } catch (ReflectiveOperationException | IllegalArgumentException e) {
-      throw new IOException(className + " " + INSTANTIATION_EXCEPTION +".", e);
+    if (Modifier.isAbstract(credClass.getModifiers())) {
+      throw new IOException("Class " + credClass + " " + ABSTRACT_PROVIDER);
     }
-    LOG.debug("Using {} for {}.", credentials, uri);
-    return credentials;
+    LOG.debug("Credential provider class is {}", className);
+
+    try {
+      // new X(uri, conf)
+      Constructor cons = getConstructor(credClass, URI.class,
+          Configuration.class);
+      if (cons != null) {
+        credentials = (AWSCredentialsProvider)cons.newInstance(uri, conf);
+        return credentials;
+      }
+
+      // X.getInstance()
+      Method factory = getFactoryMethod(credClass, AWSCredentialsProvider.class,
+          "getInstance");
+      if (factory != null) {
+        credentials = (AWSCredentialsProvider)factory.invoke(null);
+        return credentials;
+      }
+
+      // new X()
+      cons = getConstructor(credClass);
+      if (cons != null) {
+        credentials = (AWSCredentialsProvider)cons.newInstance();
+        return credentials;
+      }
+
+      // no supported constructor or factory method found
+      throw new IOException(String.format("%s " + CONSTRUCTOR_EXCEPTION
+          + ".  A class specified in %s must provide a public constructor "
+          + "accepting URI and Configuration, or a public factory method named "
+          + "getInstance that accepts no arguments, or a public default "
+          + "constructor.", className, AWS_CREDENTIALS_PROVIDER));
+    } catch (ReflectiveOperationException | IllegalArgumentException e) {
+      // supported constructor or factory method found, but the call failed
+      throw new IOException(className + " " + INSTANTIATION_EXCEPTION +".", e);
+    } finally {
+      if (credentials != null) {
+        LOG.debug("Using {} for {}.", credentials, uri);
+      }
+    }
   }
 
   /**
@@ -403,4 +501,262 @@ public final class S3AUtils {
     builder.append("size=").append(summary.getSize());
     return builder.toString();
   }
+
+  /**
+   * Get a integer option >= the minimum allowed value.
+   * @param conf configuration
+   * @param key key to look up
+   * @param defVal default value
+   * @param min minimum value
+   * @return the value
+   * @throws IllegalArgumentException if the value is below the minimum
+   */
+  static int intOption(Configuration conf, String key, int defVal, int min) {
+    int v = conf.getInt(key, defVal);
+    Preconditions.checkArgument(v >= min,
+        String.format("Value of %s: %d is below the minimum value %d",
+            key, v, min));
+    LOG.debug("Value of {} is {}", key, v);
+    return v;
+  }
+
+  /**
+   * Get a long option >= the minimum allowed value.
+   * @param conf configuration
+   * @param key key to look up
+   * @param defVal default value
+   * @param min minimum value
+   * @return the value
+   * @throws IllegalArgumentException if the value is below the minimum
+   */
+  static long longOption(Configuration conf,
+      String key,
+      long defVal,
+      long min) {
+    long v = conf.getLong(key, defVal);
+    Preconditions.checkArgument(v >= min,
+        String.format("Value of %s: %d is below the minimum value %d",
+            key, v, min));
+    LOG.debug("Value of {} is {}", key, v);
+    return v;
+  }
+
+  /**
+   * Get a long option >= the minimum allowed value, supporting memory
+   * prefixes K,M,G,T,P.
+   * @param conf configuration
+   * @param key key to look up
+   * @param defVal default value
+   * @param min minimum value
+   * @return the value
+   * @throws IllegalArgumentException if the value is below the minimum
+   */
+  static long longBytesOption(Configuration conf,
+                             String key,
+                             long defVal,
+                             long min) {
+    long v = conf.getLongBytes(key, defVal);
+    Preconditions.checkArgument(v >= min,
+            String.format("Value of %s: %d is below the minimum value %d",
+                    key, v, min));
+    LOG.debug("Value of {} is {}", key, v);
+    return v;
+  }
+
+  /**
+   * Get a size property from the configuration: this property must
+   * be at least equal to {@link Constants#MULTIPART_MIN_SIZE}.
+   * If it is too small, it is rounded up to that minimum, and a warning
+   * printed.
+   * @param conf configuration
+   * @param property property name
+   * @param defVal default value
+   * @return the value, guaranteed to be above the minimum size
+   */
+  public static long getMultipartSizeProperty(Configuration conf,
+      String property, long defVal) {
+    long partSize = conf.getLongBytes(property, defVal);
+    if (partSize < MULTIPART_MIN_SIZE) {
+      LOG.warn("{} must be at least 5 MB; configured value is {}",
+          property, partSize);
+      partSize = MULTIPART_MIN_SIZE;
+    }
+    return partSize;
+  }
+
+  /**
+   * Ensure that the long value is in the range of an integer.
+   * @param name property name for error messages
+   * @param size original size
+   * @return the size, guaranteed to be less than or equal to the max
+   * value of an integer.
+   */
+  public static int ensureOutputParameterInRange(String name, long size) {
+    if (size > Integer.MAX_VALUE) {
+      LOG.warn("s3a: {} capped to ~2.14GB" +
+          " (maximum allowed size with current output mechanism)", name);
+      return Integer.MAX_VALUE;
+    } else {
+      return (int)size;
+    }
+  }
+
+  /**
+   * Returns the public constructor of {@code cl} specified by the list of
+   * {@code args} or {@code null} if {@code cl} has no public constructor that
+   * matches that specification.
+   * @param cl class
+   * @param args constructor argument types
+   * @return constructor or null
+   */
+  private static Constructor<?> getConstructor(Class<?> cl, Class<?>... args) {
+    try {
+      Constructor cons = cl.getDeclaredConstructor(args);
+      return Modifier.isPublic(cons.getModifiers()) ? cons : null;
+    } catch (NoSuchMethodException | SecurityException e) {
+      return null;
+    }
+  }
+
+  /**
+   * Returns the public static method of {@code cl} that accepts no arguments
+   * and returns {@code returnType} specified by {@code methodName} or
+   * {@code null} if {@code cl} has no public static method that matches that
+   * specification.
+   * @param cl class
+   * @param returnType return type
+   * @param methodName method name
+   * @return method or null
+   */
+  private static Method getFactoryMethod(Class<?> cl, Class<?> returnType,
+      String methodName) {
+    try {
+      Method m = cl.getDeclaredMethod(methodName);
+      if (Modifier.isPublic(m.getModifiers()) &&
+          Modifier.isStatic(m.getModifiers()) &&
+          returnType.isAssignableFrom(m.getReturnType())) {
+        return m;
+      } else {
+        return null;
+      }
+    } catch (NoSuchMethodException | SecurityException e) {
+      return null;
+    }
+  }
+
+  /**
+   * Propagates bucket-specific settings into generic S3A configuration keys.
+   * This is done by propagating the values of the form
+   * {@code fs.s3a.bucket.${bucket}.key} to
+   * {@code fs.s3a.key}, for all values of "key" other than a small set
+   * of unmodifiable values.
+   *
+   * The source of the updated property is set to the key name of the bucket
+   * property, to aid in diagnostics of where things came from.
+   *
+   * Returns a new configuration. Why the clone?
+   * You can use the same conf for different filesystems, and the original
+   * values are not updated.
+   *
+   * The {@code fs.s3a.impl} property cannot be set, nor can
+   * any with the prefix {@code fs.s3a.bucket}.
+   *
+   * This method does not propagate security provider path information from
+   * the S3A property into the Hadoop common provider: callers must call
+   * {@link #patchSecurityCredentialProviders(Configuration)} explicitly.
+   * @param source Source Configuration object.
+   * @param bucket bucket name. Must not be empty.
+   * @return a (potentially) patched clone of the original.
+   */
+  public static Configuration propagateBucketOptions(Configuration source,
+      String bucket) {
+
+    Preconditions.checkArgument(StringUtils.isNotEmpty(bucket), "bucket");
+    final String bucketPrefix = FS_S3A_BUCKET_PREFIX + bucket +'.';
+    LOG.debug("Propagating entries under {}", bucketPrefix);
+    final Configuration dest = new Configuration(source);
+    for (Map.Entry<String, String> entry : source) {
+      final String key = entry.getKey();
+      // get the (unexpanded) value.
+      final String value = entry.getValue();
+      if (!key.startsWith(bucketPrefix) || bucketPrefix.equals(key)) {
+        continue;
+      }
+      // there's a bucket prefix, so strip it
+      final String stripped = key.substring(bucketPrefix.length());
+      if (stripped.startsWith("bucket.") || "impl".equals(stripped)) {
+        //tell user off
+        LOG.debug("Ignoring bucket option {}", key);
+      }  else {
+        // propagate the value, building a new origin field.
+        // to track overwrites, the generic key is overwritten even if
+        // already matches the new one.
+        final String generic = FS_S3A_PREFIX + stripped;
+        LOG.debug("Updating {}", generic);
+        dest.set(generic, value, key);
+      }
+    }
+    return dest;
+  }
+
+  /**
+   * Patch the security credential provider information in
+   * {@link #CREDENTIAL_PROVIDER_PATH}
+   * with the providers listed in
+   * {@link Constants#S3A_SECURITY_CREDENTIAL_PROVIDER_PATH}.
+   *
+   * This allows different buckets to use different credential files.
+   * @param conf configuration to patch
+   */
+  static void patchSecurityCredentialProviders(Configuration conf) {
+    Collection<String> customCredentials = conf.getStringCollection(
+        S3A_SECURITY_CREDENTIAL_PROVIDER_PATH);
+    Collection<String> hadoopCredentials = conf.getStringCollection(
+        CREDENTIAL_PROVIDER_PATH);
+    if (!customCredentials.isEmpty()) {
+      List<String> all = Lists.newArrayList(customCredentials);
+      all.addAll(hadoopCredentials);
+      String joined = StringUtils.join(all, ',');
+      LOG.debug("Setting {} to {}", CREDENTIAL_PROVIDER_PATH,
+          joined);
+      conf.set(CREDENTIAL_PROVIDER_PATH, joined,
+          "patch of " + S3A_SECURITY_CREDENTIAL_PROVIDER_PATH);
+    }
+  }
+
+  static String getServerSideEncryptionKey(Configuration conf) {
+    try {
+      return getPassword(conf, Constants.SERVER_SIDE_ENCRYPTION_KEY,
+        conf.getTrimmed(SERVER_SIDE_ENCRYPTION_KEY));
+    } catch (IOException e) {
+      LOG.error("Cannot retrieve SERVER_SIDE_ENCRYPTION_KEY", e);
+    }
+    return null;
+  }
+
+  /**
+   * Close the Closeable objects and <b>ignore</b> any Exception or
+   * null pointers.
+   * (This is the SLF4J equivalent of that in {@code IOUtils}).
+   * @param log the log to log at debug level. Can be null.
+   * @param closeables the objects to close
+   */
+  public static void closeAll(Logger log,
+      java.io.Closeable... closeables) {
+    for (java.io.Closeable c : closeables) {
+      if (c != null) {
+        try {
+          if (log != null) {
+            log.debug("Closing {}", c);
+          }
+          c.close();
+        } catch (Exception e) {
+          if (log != null && log.isDebugEnabled()) {
+            log.debug("Exception in closing {}", c, e);
+          }
+        }
+      }
+    }
+  }
+
 }

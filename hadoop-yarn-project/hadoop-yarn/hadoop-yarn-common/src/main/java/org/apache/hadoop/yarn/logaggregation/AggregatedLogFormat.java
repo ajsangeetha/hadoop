@@ -97,7 +97,9 @@ public class AggregatedLogFormat {
    */
   private static final FsPermission APP_LOG_FILE_UMASK = FsPermission
       .createImmutable((short) (0640 ^ 0777));
-
+  /** Default permission for the log file. */
+  private static final FsPermission APP_LOG_FILE_PERM =
+      FsPermission.getFileDefault().applyUMask(APP_LOG_FILE_UMASK);
 
   static {
     RESERVED_KEYS = new HashMap<String, AggregatedLogFormat.LogKey>();
@@ -458,11 +460,10 @@ public class AggregatedLogFormat {
               @Override
               public FSDataOutputStream run() throws Exception {
                 fc = FileContext.getFileContext(remoteAppLogFile.toUri(), conf);
-                fc.setUMask(APP_LOG_FILE_UMASK);
                 return fc.create(
                     remoteAppLogFile,
                     EnumSet.of(CreateFlag.CREATE, CreateFlag.OVERWRITE),
-                    new Options.CreateOpts[] {});
+                    Options.CreateOpts.perms(APP_LOG_FILE_PERM));
               }
             });
       } catch (InterruptedException e) {
@@ -485,34 +486,34 @@ public class AggregatedLogFormat {
     }
 
     private void writeVersion() throws IOException {
-      DataOutputStream out = this.writer.prepareAppendKey(-1);
-      VERSION_KEY.write(out);
-      out.close();
-      out = this.writer.prepareAppendValue(-1);
-      out.writeInt(VERSION);
-      out.close();
+      try (DataOutputStream out = this.writer.prepareAppendKey(-1)) {
+        VERSION_KEY.write(out);
+      }
+      try (DataOutputStream out = this.writer.prepareAppendValue(-1)) {
+        out.writeInt(VERSION);
+      }
     }
 
     public void writeApplicationOwner(String user) throws IOException {
-      DataOutputStream out = this.writer.prepareAppendKey(-1);
-      APPLICATION_OWNER_KEY.write(out);
-      out.close();
-      out = this.writer.prepareAppendValue(-1);
-      out.writeUTF(user);
-      out.close();
+      try (DataOutputStream out = this.writer.prepareAppendKey(-1)) {
+        APPLICATION_OWNER_KEY.write(out);
+      }
+      try (DataOutputStream out = this.writer.prepareAppendValue(-1)) {
+        out.writeUTF(user);
+      }
     }
 
     public void writeApplicationACLs(Map<ApplicationAccessType, String> appAcls)
         throws IOException {
-      DataOutputStream out = this.writer.prepareAppendKey(-1);
-      APPLICATION_ACL_KEY.write(out);
-      out.close();
-      out = this.writer.prepareAppendValue(-1);
-      for (Entry<ApplicationAccessType, String> entry : appAcls.entrySet()) {
-        out.writeUTF(entry.getKey().toString());
-        out.writeUTF(entry.getValue());
+      try (DataOutputStream out = this.writer.prepareAppendKey(-1)) {
+        APPLICATION_ACL_KEY.write(out);
       }
-      out.close();
+      try (DataOutputStream out = this.writer.prepareAppendValue(-1)) {
+        for (Entry<ApplicationAccessType, String> entry : appAcls.entrySet()) {
+          out.writeUTF(entry.getKey().toString());
+          out.writeUTF(entry.getValue());
+        }
+      }
     }
 
     public void append(LogKey logKey, LogValue logValue) throws IOException {
@@ -521,12 +522,12 @@ public class AggregatedLogFormat {
       if (pendingUploadFiles.size() == 0) {
         return;
       }
-      DataOutputStream out = this.writer.prepareAppendKey(-1);
-      logKey.write(out);
-      out.close();
-      out = this.writer.prepareAppendValue(-1);
-      logValue.write(out, pendingUploadFiles);
-      out.close();
+      try (DataOutputStream out = this.writer.prepareAppendKey(-1)) {
+        logKey.write(out);
+      }
+      try (DataOutputStream out = this.writer.prepareAppendValue(-1)) {
+        logValue.write(out, pendingUploadFiles);
+      }
     }
 
     public void close() {
@@ -961,7 +962,7 @@ public class AggregatedLogFormat {
 
     @Private
     public static Pair<String, String> readContainerMetaDataAndSkipData(
-        DataInputStream valueStream, PrintStream out) throws IOException {
+        DataInputStream valueStream) throws IOException {
 
       String fileType = valueStream.readUTF();
       String fileLengthStr = valueStream.readUTF();

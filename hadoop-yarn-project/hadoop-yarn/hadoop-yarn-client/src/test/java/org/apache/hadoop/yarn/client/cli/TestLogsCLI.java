@@ -126,6 +126,21 @@ public class TestLogsCLI {
     assertTrue("Should return an error code", exitCode != 0);
   }
 
+  @Test(timeout = 1000l)
+  public void testInvalidOpts() throws Exception {
+    Configuration conf = new YarnConfiguration();
+    YarnClient mockYarnClient = createMockYarnClient(
+        YarnApplicationState.FINISHED,
+        UserGroupInformation.getCurrentUser().getShortUserName());
+    LogsCLI cli = new LogsCLIForTest(mockYarnClient);
+    cli.setConf(conf);
+
+    int exitCode = cli.run( new String[] { "-InvalidOpts"});
+    assertTrue(exitCode == -1);
+    assertTrue(sysErrStream.toString().contains(
+        "options parsing failed: Unrecognized option: -InvalidOpts"));
+  }
+
   @Test(timeout = 5000l)
   public void testInvalidApplicationId() throws Exception {
     Configuration conf = new YarnConfiguration();
@@ -740,6 +755,23 @@ public class TestLogsCLI {
     Set<String> logTypes1 = capturedRequests.get(1).getLogTypes();
     Assert.assertTrue(logTypes0.contains("ALL") && (logTypes0.size() == 1));
     Assert.assertTrue(logTypes1.contains("ALL") && (logTypes1.size() == 1));
+
+    mockYarnClient = createMockYarnClientWithException(
+        YarnApplicationState.RUNNING, ugi.getShortUserName());
+    LogsCLI cli2 = spy(new LogsCLIForTest(mockYarnClient));
+    doReturn(0).when(cli2).printContainerLogsFromRunningApplication(
+        any(Configuration.class), any(ContainerLogsRequest.class),
+        any(LogCLIHelpers.class), anyBoolean());
+    doReturn("123").when(cli2).getNodeHttpAddressFromRMWebString(
+        any(ContainerLogsRequest.class));
+    cli2.setConf(new YarnConfiguration());
+    ContainerId containerId100 = ContainerId.newContainerId(appAttemptId, 100);
+    exitCode = cli2.run(new String[] {"-applicationId", appId.toString(),
+        "-containerId", containerId100.toString(), "-nodeAddress", "NM:1234"});
+    assertTrue(exitCode == 0);
+    verify(cli2, times(1)).printContainerLogsFromRunningApplication(
+        any(Configuration.class), logsRequestCaptor.capture(),
+        any(LogCLIHelpers.class), anyBoolean());
   }
 
   @Test (timeout = 15000)
@@ -1373,6 +1405,20 @@ public class TestLogsCLI {
       doReturn(mockContainers).when(mockClient).getContainers(any(
           ApplicationAttemptId.class));
     }
+    return mockClient;
+  }
+
+  private YarnClient createMockYarnClientWithException(
+      YarnApplicationState appState, String user)
+      throws YarnException, IOException {
+    YarnClient mockClient = mock(YarnClient.class);
+    ApplicationReport mockAppReport = mock(ApplicationReport.class);
+    doReturn(user).when(mockAppReport).getUser();
+    doReturn(appState).when(mockAppReport).getYarnApplicationState();
+    doReturn(mockAppReport).when(mockClient).getApplicationReport(
+        any(ApplicationId.class));
+    doThrow(new YarnException()).when(mockClient).getContainerReport(
+        any(ContainerId.class));
     return mockClient;
   }
 

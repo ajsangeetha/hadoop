@@ -46,6 +46,7 @@ import org.apache.hadoop.yarn.server.nodemanager.containermanager.localizer.Cont
 import org.apache.hadoop.yarn.server.nodemanager.containermanager.runtime.ContainerExecutionException;
 import org.apache.hadoop.yarn.server.nodemanager.containermanager.runtime.ContainerRuntimeContext;
 import org.apache.hadoop.yarn.server.nodemanager.executor.ContainerLivenessContext;
+import org.apache.hadoop.yarn.server.nodemanager.executor.ContainerPrepareContext;
 import org.apache.hadoop.yarn.server.nodemanager.executor.ContainerReacquisitionContext;
 import org.apache.hadoop.yarn.server.nodemanager.executor.ContainerSignalContext;
 import org.apache.hadoop.yarn.server.nodemanager.executor.ContainerStartContext;
@@ -270,6 +271,7 @@ public class LinuxContainerExecutor extends ContainerExecutor {
         this.linuxContainerRuntime = runtime;
       }
     } catch (ContainerExecutionException e) {
+      LOG.error("Failed to initialize linux container runtime(s)!", e);
       throw new IOException("Failed to initialize linux container runtime(s)!");
     }
 
@@ -359,6 +361,28 @@ public class LinuxContainerExecutor extends ContainerExecutor {
       String locId, InetSocketAddress nmAddr, List<String> localDirs) {
     ContainerLocalizer.buildMainArgs(command, user, appId, locId, nmAddr,
       localDirs);
+  }
+
+  @Override
+  public void prepareContainer(ContainerPrepareContext ctx) throws IOException {
+
+    ContainerRuntimeContext.Builder builder =
+        new ContainerRuntimeContext.Builder(ctx.getContainer());
+
+    builder.setExecutionAttribute(LOCALIZED_RESOURCES,
+            ctx.getLocalizedResources())
+        .setExecutionAttribute(USER, ctx.getUser())
+        .setExecutionAttribute(CONTAINER_LOCAL_DIRS,
+            ctx.getContainerLocalDirs())
+        .setExecutionAttribute(CONTAINER_RUN_CMDS, ctx.getCommands())
+        .setExecutionAttribute(CONTAINER_ID_STR,
+            ctx.getContainer().getContainerId().toString());
+
+    try {
+      linuxContainerRuntime.prepareContainer(builder.build());
+    } catch (ContainerExecutionException e) {
+      throw new IOException("Unable to prepare container: ", e);
+    }
   }
 
   @Override
@@ -680,6 +704,11 @@ public class LinuxContainerExecutor extends ContainerExecutor {
     }
 
     return files.toArray(new File[files.size()]);
+  }
+
+  @Override
+  public void symLink(String target, String symlink) {
+
   }
 
   @Override

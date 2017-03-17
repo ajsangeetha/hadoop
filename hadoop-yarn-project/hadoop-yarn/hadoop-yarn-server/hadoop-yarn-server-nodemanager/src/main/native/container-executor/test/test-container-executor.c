@@ -395,6 +395,54 @@ void test_delete_app() {
   free(dont_touch);
 }
 
+void validate_feature_enabled_value(int expected_value, const char* key,
+    int default_value, struct configuration *cfg) {
+  int value = is_feature_enabled(key, default_value, cfg);
+
+  if (value != expected_value) {
+    printf("FAIL: expected value %d for key %s but found %d\n",
+    expected_value, key, value);
+    exit(1);
+  }
+}
+
+void test_is_feature_enabled() {
+  char* filename = TEST_ROOT "/feature_flag_test.cfg";
+  FILE *file = fopen(filename, "w");
+  int disabled = 0;
+  int enabled = 1;
+  struct configuration cfg = {.size=0, .confdetails=NULL};
+
+  if (file == NULL) {
+    printf("FAIL: Could not open configuration file: %s\n", filename);
+    exit(1);
+  }
+
+  fprintf(file, "feature.name1.enabled=0\n");
+  fprintf(file, "feature.name2.enabled=1\n");
+  fprintf(file, "feature.name3.enabled=1klajdflkajdsflk\n");
+  fprintf(file, "feature.name4.enabled=asdkjfasdkljfklsdjf0\n");
+  fprintf(file, "feature.name5.enabled=-1\n");
+  fprintf(file, "feature.name6.enabled=2\n");
+  fclose(file);
+  read_config(filename, &cfg);
+
+  validate_feature_enabled_value(disabled, "feature.name1.enabled",
+      disabled, &cfg);
+  validate_feature_enabled_value(enabled, "feature.name2.enabled",
+          disabled, &cfg);
+  validate_feature_enabled_value(disabled, "feature.name3.enabled",
+          disabled, &cfg);
+  validate_feature_enabled_value(disabled, "feature.name4.enabled",
+          disabled, &cfg);
+  validate_feature_enabled_value(enabled, "feature.name5.enabled",
+          enabled, &cfg);
+  validate_feature_enabled_value(disabled, "feature.name6.enabled",
+          disabled, &cfg);
+
+
+  free_configurations(&cfg);
+}
 
 void test_delete_user() {
   printf("\nTesting delete_user\n");
@@ -517,7 +565,7 @@ void test_list_as_user() {
   }
 
   // Test with empty dir string
-  sprintf(buffer, "");
+  strcpy(buffer, "");
   int ret = list_as_user(buffer);
 
   if (ret == 0) {
@@ -965,42 +1013,76 @@ void test_recursive_unlink_children() {
   }
 }
 
+
 /**
- * This test is used to verify that app and container directories can be
- * created with required permissions when umask has been set to a restrictive
- * value of 077.
+ * This test is used to verify that trim() works correctly
  */
-void test_dir_permissions() {
-  printf("\nTesting dir permissions\n");
+void test_trim_function() {
+  char* trimmed = NULL;
 
-  // Set umask to 077
-  umask(077);
+  printf("\nTesting trim function\n");
 
-  // Change user to the yarn user. This only takes effect when we're
-  // running as root.
-  if (seteuid(user_detail->pw_uid) != 0) {
-    printf("FAIL: failed to seteuid to user - %s\n", strerror(errno));
+  // Check NULL input
+  if (trim(NULL) != NULL) {
+    printf("FAIL: trim(NULL) should be NULL\n");
     exit(1);
   }
 
-  // Create container directories for "app_5"
-  char* container_dir = get_container_work_directory(TEST_ROOT "/local-1",
-                                     yarn_username, "app_5", "container_1");
-  create_log_dirs("app_5", log_dirs);
-  create_container_directories(yarn_username, "app_5", "container_1",
-                               local_dirs, log_dirs, container_dir);
-
-  // Verify directories have been created with required permissions
-  mode_t container_dir_perm = S_IRWXU | S_IRGRP | S_IXGRP;
-  struct stat sb;
-  if (stat(container_dir, &sb) != 0 ||
-      check_dir(container_dir, sb.st_mode, container_dir_perm, 1) != 0) {
-    printf("FAIL: failed to create container directory %s "
-           "with required permissions\n", container_dir);
+  // Check empty input
+  trimmed = trim("");
+  if (strcmp(trimmed, "") != 0) {
+    printf("FAIL: trim(\"\") should be \"\"\n");
     exit(1);
   }
+  free(trimmed);
 
-  free(container_dir);
+  // Check single space input
+  trimmed = trim(" ");
+  if (strcmp(trimmed, "") != 0) {
+    printf("FAIL: trim(\" \") should be \"\"\n");
+    exit(1);
+  }
+  free(trimmed);
+
+  // Check multi space input
+  trimmed = trim("   ");
+  if (strcmp(trimmed, "") != 0) {
+    printf("FAIL: trim(\"   \") should be \"\"\n");
+    exit(1);
+  }
+  free(trimmed);
+
+  // Check both side trim input
+  trimmed = trim(" foo ");
+  if (strcmp(trimmed, "foo") != 0) {
+    printf("FAIL: trim(\" foo \") should be \"foo\"\n");
+    exit(1);
+  }
+  free(trimmed);
+
+  // Check left side trim input
+  trimmed = trim("foo   ");
+  if (strcmp(trimmed, "foo") != 0) {
+    printf("FAIL: trim(\"foo   \") should be \"foo\"\n");
+    exit(1);
+  }
+  free(trimmed);
+
+  // Check right side trim input
+  trimmed = trim("   foo");
+  if (strcmp(trimmed, "foo") != 0) {
+    printf("FAIL: trim(\"   foo\") should be \"foo\"\n");
+    exit(1);
+  }
+  free(trimmed);
+
+  // Check no trim input
+  trimmed = trim("foo");
+  if (strcmp(trimmed, "foo") != 0) {
+    printf("FAIL: trim(\"foo\") should be \"foo\"\n");
+    exit(1);
+  }
+  free(trimmed);
 }
 
 // This test is expected to be executed either by a regular
@@ -1091,6 +1173,9 @@ int main(int argc, char **argv) {
   printf("\nTesting delete_app()\n");
   test_delete_app();
 
+  printf("\nTesting is_feature_enabled()\n");
+  test_is_feature_enabled();
+
   test_check_user(0);
 
 #ifdef __APPLE__
@@ -1131,10 +1216,6 @@ int main(int argc, char **argv) {
     test_run_container();
   }
 
-  // This test needs to be run in a subshell, so that when it changes umask
-  // and user, it doesn't give up our privs.
-  run_test_in_child("test_dir_permissions", test_dir_permissions);
-
   /*
    * try to seteuid(0).  if it doesn't work, carry on anyway.
    * we're going to capture the return value to get rid of a 
@@ -1167,9 +1248,13 @@ int main(int argc, char **argv) {
 #endif
 
   run("rm -fr " TEST_ROOT);
+
+  test_trim_function();
+
   printf("\nFinished tests\n");
 
   free(current_username);
   free_executor_configurations();
+
   return 0;
 }

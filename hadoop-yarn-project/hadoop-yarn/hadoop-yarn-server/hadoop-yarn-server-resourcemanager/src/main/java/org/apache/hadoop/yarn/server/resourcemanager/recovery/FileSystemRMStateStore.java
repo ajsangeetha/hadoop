@@ -142,11 +142,6 @@ public class FileSystemRMStateStore extends RMStateStore {
     // authenticated with kerberos so we are good to create a file-system
     // handle.
     fsConf = new Configuration(getConfig());
-    fsConf.setBoolean("dfs.client.retry.policy.enabled", true);
-    String retryPolicy =
-        fsConf.get(YarnConfiguration.FS_RM_STATE_STORE_RETRY_POLICY_SPEC,
-          YarnConfiguration.DEFAULT_FS_RM_STATE_STORE_RETRY_POLICY_SPEC);
-    fsConf.set("dfs.client.retry.policy.spec", retryPolicy);
 
     String scheme = fsWorkingPath.toUri().getScheme();
     if (scheme == null) {
@@ -745,7 +740,7 @@ public class FileSystemRMStateStore extends RMStateStore {
         try {
           return run();
         } catch (IOException e) {
-          LOG.info("Exception while executing a FS operation.", e);
+          LOG.info("Exception while executing an FS operation.", e);
           if (++retry > fsNumRetries) {
             LOG.info("Maxed out FS retries. Giving up!");
             throw e;

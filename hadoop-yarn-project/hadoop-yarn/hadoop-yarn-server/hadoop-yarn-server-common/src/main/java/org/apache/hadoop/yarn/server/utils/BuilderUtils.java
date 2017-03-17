@@ -29,8 +29,11 @@ import java.util.Map;
 import java.util.Set;
 
 import org.apache.hadoop.classification.InterfaceAudience.Private;
+import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.io.DataInputByteBuffer;
 import org.apache.hadoop.io.Text;
 import org.apache.hadoop.net.NetUtils;
+import org.apache.hadoop.security.Credentials;
 import org.apache.hadoop.security.SecurityUtil;
 import org.apache.hadoop.yarn.api.protocolrecords.AllocateResponse;
 import org.apache.hadoop.yarn.api.records.AMCommand;
@@ -62,6 +65,8 @@ import org.apache.hadoop.yarn.api.records.ResourceUtilization;
 import org.apache.hadoop.yarn.api.records.Token;
 import org.apache.hadoop.yarn.api.records.URL;
 import org.apache.hadoop.yarn.api.records.YarnApplicationState;
+import org.apache.hadoop.yarn.conf.YarnConfiguration;
+import org.apache.hadoop.yarn.exceptions.YarnException;
 import org.apache.hadoop.yarn.factories.RecordFactory;
 import org.apache.hadoop.yarn.factory.providers.RecordFactoryProvider;
 import org.apache.hadoop.yarn.nodelabels.CommonNodeLabelsManager;
@@ -446,7 +451,8 @@ public class BuilderUtils {
   public static ApplicationResourceUsageReport newApplicationResourceUsageReport(
       int numUsedContainers, int numReservedContainers, Resource usedResources,
       Resource reservedResources, Resource neededResources, long memorySeconds, 
-      long vcoreSeconds) {
+      long vcoreSeconds, long preemptedMemorySeconds,
+      long preemptedVcoreSeconds) {
     ApplicationResourceUsageReport report =
         recordFactory.newRecordInstance(ApplicationResourceUsageReport.class);
     report.setNumUsedContainers(numUsedContainers);
@@ -456,6 +462,8 @@ public class BuilderUtils {
     report.setNeededResources(neededResources);
     report.setMemorySeconds(memorySeconds);
     report.setVcoreSeconds(vcoreSeconds);
+    report.setPreemptedMemorySeconds(preemptedMemorySeconds);
+    report.setPreemptedVcoreSeconds(preemptedVcoreSeconds);
     return report;
   }
 
@@ -492,5 +500,32 @@ public class BuilderUtils {
     response.setPreemptionMessage(preempt);
 
     return response;
+  }
+
+  public static Credentials parseCredentials(
+      ApplicationSubmissionContext application) throws IOException {
+    Credentials credentials = new Credentials();
+    DataInputByteBuffer dibb = new DataInputByteBuffer();
+    ByteBuffer tokens = application.getAMContainerSpec().getTokens();
+    if (tokens != null) {
+      dibb.reset(tokens);
+      credentials.readTokenStorageStream(dibb);
+      tokens.rewind();
+    }
+    return credentials;
+  }
+
+  public static Configuration parseTokensConf(
+      ApplicationSubmissionContext context) throws IOException {
+    ByteBuffer tokensConf = context.getAMContainerSpec().getTokensConf();
+    if (tokensConf == null) {
+      return null;
+    }
+    DataInputByteBuffer dibb = new DataInputByteBuffer();
+    dibb.reset(tokensConf);
+    Configuration appConf = new Configuration(false);
+    appConf.readFields(dibb);
+    tokensConf.rewind();
+    return appConf;
   }
 }

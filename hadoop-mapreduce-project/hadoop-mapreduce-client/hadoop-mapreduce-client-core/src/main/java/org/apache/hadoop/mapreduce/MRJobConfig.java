@@ -57,11 +57,6 @@ public interface MRJobConfig {
   // negative values disable the limit
   public static final long DEFAULT_TASK_LOCAL_WRITE_LIMIT_BYTES = -1;
 
-  public static final String TASK_PROGRESS_REPORT_INTERVAL =
-      "mapreduce.task.progress-report.interval";
-  /** The number of milliseconds between progress reports. */
-  public static final int DEFAULT_TASK_PROGRESS_REPORT_INTERVAL = 3000;
-
   public static final String JAR = "mapreduce.job.jar";
 
   public static final String ID = "mapreduce.job.id";
@@ -220,7 +215,11 @@ public interface MRJobConfig {
 
   public static final String IO_SORT_FACTOR = "mapreduce.task.io.sort.factor";
 
+  public static final int DEFAULT_IO_SORT_FACTOR = 10;
+
   public static final String IO_SORT_MB = "mapreduce.task.io.sort.mb";
+
+  public static final int DEFAULT_IO_SORT_MB = 100;
 
   public static final String INDEX_CACHE_MEMORY_LIMIT = "mapreduce.task.index.cache.limit.bytes";
 
@@ -258,6 +257,10 @@ public interface MRJobConfig {
   public static final String TASK_REDUCE_PROFILE_PARAMS = "mapreduce.task.profile.reduce.params";
   
   public static final String TASK_TIMEOUT = "mapreduce.task.timeout";
+  long DEFAULT_TASK_TIMEOUT_MILLIS = 5 * 60 * 1000L;
+
+  String TASK_PROGRESS_REPORT_INTERVAL =
+      "mapreduce.task.progress-report.interval";
 
   public static final String TASK_TIMEOUT_CHECK_INTERVAL_MS = "mapreduce.task.timeout.check-interval-ms";
 
@@ -506,7 +509,7 @@ public interface MRJobConfig {
    */
   public static final String MR_CLIENT_JOB_MAX_RETRIES =
       MR_PREFIX + "client.job.max-retries";
-  public static final int DEFAULT_MR_CLIENT_JOB_MAX_RETRIES = 0;
+  public static final int DEFAULT_MR_CLIENT_JOB_MAX_RETRIES = 3;
 
   /**
    * How long to wait between jobclient retries on failure
@@ -589,7 +592,13 @@ public interface MRJobConfig {
    */
   public static final String MR_AM_JOB_CLIENT_PORT_RANGE = 
     MR_AM_PREFIX + "job.client.port-range";
-  
+
+  /**
+   * Range of ports that the MapReduce AM can use when binding for its webapp.
+   * Leave blank if you want all possible ports.
+   */
+  String MR_AM_WEBAPP_PORT_RANGE = MR_AM_PREFIX + "webapp.port-range";
+
   /** Enable blacklisting of nodes in the job.*/
   public static final String MR_AM_JOB_NODE_BLACKLISTING_ENABLE = 
     MR_AM_PREFIX  + "job.node-blacklisting.enable";
@@ -1002,12 +1011,14 @@ public interface MRJobConfig {
    * requested by the AM will be opportunistic. If the total number of maps
    * for the job is less than 'x', then ALL maps will be OPPORTUNISTIC
    */
-  public static final String MR_NUM_OPPORTUNISTIC_MAPS_PER_100 =
-      "mapreduce.job.num-opportunistic-maps-per-100";
-  public static final int DEFAULT_MR_NUM_OPPORTUNISTIC_MAPS_PER_100 = 0;
+  public static final String MR_NUM_OPPORTUNISTIC_MAPS_PERCENT =
+      "mapreduce.job.num-opportunistic-maps-percent";
+  public static final int DEFAULT_MR_NUM_OPPORTUNISTIC_MAPS_PERCENT = 0;
 
   /**
    * A comma-separated list of properties whose value will be redacted.
    */
   String MR_JOB_REDACTED_PROPERTIES = "mapreduce.job.redacted-properties";
+
+  String MR_JOB_SEND_TOKEN_CONF = "mapreduce.job.send-token-conf";
 }

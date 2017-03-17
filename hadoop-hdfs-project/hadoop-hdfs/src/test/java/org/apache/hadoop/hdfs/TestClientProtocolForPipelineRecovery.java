@@ -39,7 +39,7 @@ import org.apache.hadoop.hdfs.server.common.HdfsServerConstants.BlockUCState;
 import org.apache.hadoop.hdfs.server.datanode.DataNode;
 import org.apache.hadoop.hdfs.server.datanode.DataNodeFaultInjector;
 import org.apache.hadoop.hdfs.server.datanode.DataNodeTestUtils;
-import org.apache.hadoop.hdfs.server.datanode.ReplicaInPipelineInterface;
+import org.apache.hadoop.hdfs.server.datanode.ReplicaInPipeline;
 import org.apache.hadoop.hdfs.server.namenode.LeaseExpiredException;
 import org.apache.hadoop.hdfs.server.protocol.NamenodeProtocols;
 import org.apache.hadoop.hdfs.tools.DFSAdmin;
@@ -453,7 +453,8 @@ public class TestClientProtocolForPipelineRecovery {
     DataNodeFaultInjector dnFaultInjector = new DataNodeFaultInjector() {
       int tries = 1;
       @Override
-      public void stopSendingPacketDownstream() throws IOException {
+      public void stopSendingPacketDownstream(final String mirrAddr)
+          throws IOException {
         if (tries > 0) {
           tries--;
           try {
@@ -530,7 +531,7 @@ public class TestClientProtocolForPipelineRecovery {
 
       DataNodeFaultInjector.set(new DataNodeFaultInjector() {
         @Override
-        public void failPipeline(ReplicaInPipelineInterface replicaInfo,
+        public void failPipeline(ReplicaInPipeline replicaInfo,
             String mirror) throws IOException {
           if (!lastDn.equals(mirror)) {
             // Only fail for second DN

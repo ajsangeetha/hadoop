@@ -40,9 +40,9 @@ import java.util.Set;
 import java.util.regex.Pattern;
 import static java.util.concurrent.TimeUnit.*;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import junit.framework.TestCase;
 import static org.junit.Assert.assertArrayEquals;
-import static org.junit.Assert.fail;
 
 import org.apache.commons.lang.StringUtils;
 import org.apache.hadoop.conf.Configuration.IntegerRanges;
@@ -53,7 +53,6 @@ import org.apache.hadoop.test.GenericTestUtils;
 
 import static org.apache.hadoop.util.PlatformName.IBM_JAVA;
 
-import org.codehaus.jackson.map.ObjectMapper;
 import org.mockito.Mockito;
 
 public class TestConfiguration extends TestCase {
@@ -70,6 +69,9 @@ public class TestConfiguration extends TestCase {
   final static String XMLHEADER = 
             IBM_JAVA?"<?xml version=\"1.0\" encoding=\"UTF-8\"?><configuration>":
   "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"no\"?><configuration>";
+
+  /** Four apostrophes. */
+  public static final String ESCAPED = "&apos;&#39;&#0039;&#x27;";
 
   @Override
   protected void setUp() throws Exception {
@@ -169,6 +171,9 @@ public class TestConfiguration extends TestCase {
     declareProperty("my.fullfile", "${my.base}/${my.file}${my.suffix}", "/tmp/hadoop_user/hello.txt");
     // check that undefined variables are returned as-is
     declareProperty("my.failsexpand", "a${my.undefvar}b", "a${my.undefvar}b");
+    // check that multiple variable references are resolved
+    declareProperty("my.user.group", "${user.name} ${user.name}",
+        "hadoop_user hadoop_user");
     endConfig();
     Path fileResource = new Path(CONFIG);
     mock.addResource(fileResource);
@@ -400,7 +405,18 @@ public class TestConfiguration extends TestCase {
     //two spaces one after "this", one before "contains"
     assertEquals("this  contains a comment", conf.get("my.comment"));
   }
-  
+
+  public void testEscapedCharactersInValue() throws IOException {
+    out=new BufferedWriter(new FileWriter(CONFIG));
+    startConfig();
+    appendProperty("my.comment", ESCAPED);
+    endConfig();
+    Path fileResource = new Path(CONFIG);
+    conf.addResource(fileResource);
+    //two spaces one after "this", one before "contains"
+    assertEquals("''''", conf.get("my.comment"));
+  }
+
   public void testTrim() throws IOException {
     out=new BufferedWriter(new FileWriter(CONFIG));
     startConfig();
@@ -880,6 +896,15 @@ public class TestConfiguration extends TestCase {
     assertEquals(30L, conf.getTimeDuration("test.time.X", 30, SECONDS));
     conf.set("test.time.X", "30");
     assertEquals(30L, conf.getTimeDuration("test.time.X", 40, SECONDS));
+    assertEquals(10L, conf.getTimeDuration("test.time.c", "10", SECONDS));
+    assertEquals(30L, conf.getTimeDuration("test.time.c", "30s", SECONDS));
+    assertEquals(120L, conf.getTimeDuration("test.time.c", "2m", SECONDS));
+    conf.set("test.time.c", "30");
+    assertEquals(30L, conf.getTimeDuration("test.time.c", "40s", SECONDS));
+
+    // check suffix insensitive
+    conf.set("test.time.d", "30S");
+    assertEquals(30L, conf.getTimeDuration("test.time.d", 40, SECONDS));
 
     for (Configuration.ParsedTimeDuration ptd :
          Configuration.ParsedTimeDuration.values()) {
@@ -887,6 +912,43 @@ public class TestConfiguration extends TestCase {
       assertEquals(1 + ptd.suffix(), conf.get("test.time.unit"));
       assertEquals(1, conf.getTimeDuration("test.time.unit", 2, ptd.unit()));
     }
+  }
+
+  public void testTimeDurationWarning() {
+    // check warn for possible loss of precision
+    final String warnFormat = "Possible loss of precision converting %s" +
+            " to %s for test.time.warn";
+    final ArrayList<String> warnchk = new ArrayList<>();
+    Configuration wconf = new Configuration(false) {
+      @Override
+      void logDeprecation(String message) {
+        warnchk.add(message);
+      }
+    };
+    String[] convDAYS = new String[]{"23h", "30m", "40s", "10us", "40000ms"};
+    for (String s : convDAYS) {
+      wconf.set("test.time.warn", s);
+      assertEquals(0, wconf.getTimeDuration("test.time.warn", 1, DAYS));
+    }
+    for (int i = 0; i < convDAYS.length; ++i) {
+      String wchk = String.format(warnFormat, convDAYS[i], "DAYS");
+      assertEquals(wchk, warnchk.get(i));
+    }
+
+    warnchk.clear();
+    wconf.setTimeDuration("test.time.warn", 1441, MINUTES);
+    assertEquals(1, wconf.getTimeDuration("test.time.warn", 0, DAYS));
+    assertEquals(24, wconf.getTimeDuration("test.time.warn", 0, HOURS));
+    String dchk = String.format(warnFormat, "1441m", "DAYS");
+    assertEquals(dchk, warnchk.get(0));
+    String hchk = String.format(warnFormat, "1441m", "HOURS");
+    assertEquals(hchk, warnchk.get(1));
+    assertEquals(1441, wconf.getTimeDuration("test.time.warn", 0, MINUTES));
+    // no warning
+    assertEquals(2, warnchk.size());
+    assertEquals(86460, wconf.getTimeDuration("test.time.warn", 0, SECONDS));
+    // no warning
+    assertEquals(2, warnchk.size());
   }
 
   public void testPattern() throws IOException {
@@ -1094,7 +1156,19 @@ public class TestConfiguration extends TestCase {
       this.properties = properties;
     }
   }
-  
+
+  static class SingleJsonConfiguration {
+    private JsonProperty property;
+
+    public JsonProperty getProperty() {
+      return property;
+    }
+
+    public void setProperty(JsonProperty property) {
+      this.property = property;
+    }
+  }
+
   static class JsonProperty {
     String key;
     public String getKey() {
@@ -1125,7 +1199,14 @@ public class TestConfiguration extends TestCase {
     boolean isFinal;
     String resource;
   }
-  
+
+  private Configuration getActualConf(String xmlStr) {
+    Configuration ac = new Configuration(false);
+    InputStream in = new ByteArrayInputStream(xmlStr.getBytes());
+    ac.addResource(in);
+    return ac;
+  }
+
   public void testGetSetTrimmedNames() throws IOException {
     Configuration conf = new Configuration(false);
     conf.set(" name", "value");
@@ -1134,7 +1215,121 @@ public class TestConfiguration extends TestCase {
     assertEquals("value", conf.getRaw("  name  "));
   }
 
-  public void testDumpConfiguration () throws IOException {
+  public void testDumpProperty() throws IOException {
+    StringWriter outWriter = new StringWriter();
+    ObjectMapper mapper = new ObjectMapper();
+    String jsonStr = null;
+    String xmlStr = null;
+    try {
+      Configuration testConf = new Configuration(false);
+      out = new BufferedWriter(new FileWriter(CONFIG));
+      startConfig();
+      appendProperty("test.key1", "value1");
+      appendProperty("test.key2", "value2", true);
+      appendProperty("test.key3", "value3");
+      endConfig();
+      Path fileResource = new Path(CONFIG);
+      testConf.addResource(fileResource);
+      out.close();
+
+      // case 1: dump an existing property
+      // test json format
+      outWriter = new StringWriter();
+      Configuration.dumpConfiguration(testConf, "test.key2", outWriter);
+      jsonStr = outWriter.toString();
+      outWriter.close();
+      mapper = new ObjectMapper();
+      SingleJsonConfiguration jconf1 =
+          mapper.readValue(jsonStr, SingleJsonConfiguration.class);
+      JsonProperty jp1 = jconf1.getProperty();
+      assertEquals("test.key2", jp1.getKey());
+      assertEquals("value2", jp1.getValue());
+      assertEquals(true, jp1.isFinal);
+      assertEquals(fileResource.toUri().getPath(), jp1.getResource());
+
+      // test xml format
+      outWriter = new StringWriter();
+      testConf.writeXml("test.key2", outWriter);
+      xmlStr = outWriter.toString();
+      outWriter.close();
+      Configuration actualConf1 = getActualConf(xmlStr);
+      assertEquals(1, actualConf1.size());
+      assertEquals("value2", actualConf1.get("test.key2"));
+      assertTrue(actualConf1.getFinalParameters().contains("test.key2"));
+      assertEquals(fileResource.toUri().getPath(),
+          actualConf1.getPropertySources("test.key2")[0]);
+
+      // case 2: dump an non existing property
+      // test json format
+      try {
+        outWriter = new StringWriter();
+        Configuration.dumpConfiguration(testConf,
+            "test.unknown.key", outWriter);
+        outWriter.close();
+      } catch (Exception e) {
+        assertTrue(e instanceof IllegalArgumentException);
+        assertTrue(e.getMessage().contains("test.unknown.key") &&
+            e.getMessage().contains("not found"));
+      }
+      // test xml format
+      try {
+        outWriter = new StringWriter();
+        testConf.writeXml("test.unknown.key", outWriter);
+        outWriter.close();
+      } catch (Exception e) {
+        assertTrue(e instanceof IllegalArgumentException);
+        assertTrue(e.getMessage().contains("test.unknown.key") &&
+            e.getMessage().contains("not found"));
+      }
+
+      // case 3: specify a null property, ensure all configurations are dumped
+      outWriter = new StringWriter();
+      Configuration.dumpConfiguration(testConf, null, outWriter);
+      jsonStr = outWriter.toString();
+      mapper = new ObjectMapper();
+      JsonConfiguration jconf3 =
+          mapper.readValue(jsonStr, JsonConfiguration.class);
+      assertEquals(3, jconf3.getProperties().length);
+
+      outWriter = new StringWriter();
+      testConf.writeXml(null, outWriter);
+      xmlStr = outWriter.toString();
+      outWriter.close();
+      Configuration actualConf3 = getActualConf(xmlStr);
+      assertEquals(3, actualConf3.size());
+      assertTrue(actualConf3.getProps().containsKey("test.key1") &&
+          actualConf3.getProps().containsKey("test.key2") &&
+          actualConf3.getProps().containsKey("test.key3"));
+
+      // case 4: specify an empty property, ensure all configurations are dumped
+      outWriter = new StringWriter();
+      Configuration.dumpConfiguration(testConf, "", outWriter);
+      jsonStr = outWriter.toString();
+      mapper = new ObjectMapper();
+      JsonConfiguration jconf4 =
+          mapper.readValue(jsonStr, JsonConfiguration.class);
+      assertEquals(3, jconf4.getProperties().length);
+
+      outWriter = new StringWriter();
+      testConf.writeXml("", outWriter);
+      xmlStr = outWriter.toString();
+      outWriter.close();
+      Configuration actualConf4 = getActualConf(xmlStr);
+      assertEquals(3, actualConf4.size());
+      assertTrue(actualConf4.getProps().containsKey("test.key1") &&
+          actualConf4.getProps().containsKey("test.key2") &&
+          actualConf4.getProps().containsKey("test.key3"));
+    } finally {
+      if(outWriter != null) {
+        outWriter.close();
+      }
+      if(out != null) {
+        out.close();
+      }
+    }
+  }
+
+  public void testDumpConfiguration() throws IOException {
     StringWriter outWriter = new StringWriter();
     Configuration.dumpConfiguration(conf, outWriter);
     String jsonStr = outWriter.toString();
@@ -1330,7 +1525,7 @@ public class TestConfiguration extends TestCase {
     }
   }
 
-  public void testInvalidSubstitutation() {
+  public void testInvalidSubstitution() {
     final Configuration configuration = new Configuration(false);
 
     // 2-var loops
@@ -1344,25 +1539,6 @@ public class TestConfiguration extends TestCase {
       configuration.set(key, keyExpression);
       assertEquals("Unexpected value", keyExpression, configuration.get(key));
     }
-
-    //
-    // 3-variable loops
-    //
-
-    final String expVal1 = "${test.var2}";
-    String testVar1 = "test.var1";
-    configuration.set(testVar1, expVal1);
-    configuration.set("test.var2", "${test.var3}");
-    configuration.set("test.var3", "${test.var1}");
-    assertEquals("Unexpected value", expVal1, configuration.get(testVar1));
-
-    // 3-variable loop with non-empty value prefix/suffix
-    //
-    final String expVal2 = "foo2${test.var2}bar2";
-    configuration.set(testVar1, expVal2);
-    configuration.set("test.var2", "foo3${test.var3}bar3");
-    configuration.set("test.var3", "foo1${test.var1}bar1");
-    assertEquals("Unexpected value", expVal2, configuration.get(testVar1));
   }
 
   public void testIncompleteSubbing() {

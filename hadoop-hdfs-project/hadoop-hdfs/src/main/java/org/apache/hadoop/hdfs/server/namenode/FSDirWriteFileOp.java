@@ -19,14 +19,10 @@ package org.apache.hadoop.hdfs.server.namenode;
 
 import com.google.common.base.Preconditions;
 import org.apache.hadoop.HadoopIllegalArgumentException;
-import org.apache.hadoop.crypto.CipherSuite;
-import org.apache.hadoop.crypto.CryptoProtocolVersion;
-import org.apache.hadoop.crypto.key.KeyProviderCryptoExtension;
 import org.apache.hadoop.hdfs.AddBlockFlag;
 import org.apache.hadoop.fs.CreateFlag;
 import org.apache.hadoop.fs.FileAlreadyExistsException;
 import org.apache.hadoop.fs.FileEncryptionInfo;
-import org.apache.hadoop.fs.InvalidPathException;
 import org.apache.hadoop.fs.XAttr;
 import org.apache.hadoop.fs.permission.AclEntry;
 import org.apache.hadoop.fs.permission.FsAction;
@@ -38,7 +34,6 @@ import org.apache.hadoop.hdfs.protocol.BlockStoragePolicy;
 import org.apache.hadoop.hdfs.protocol.ClientProtocol;
 import org.apache.hadoop.hdfs.protocol.DatanodeInfo;
 import org.apache.hadoop.hdfs.protocol.ErasureCodingPolicy;
-import org.apache.hadoop.hdfs.protocol.EncryptionZone;
 import org.apache.hadoop.hdfs.protocol.ExtendedBlock;
 import org.apache.hadoop.hdfs.protocol.FSLimitException;
 import org.apache.hadoop.hdfs.protocol.HdfsFileStatus;
@@ -50,9 +45,11 @@ import org.apache.hadoop.hdfs.server.blockmanagement.BlockInfoContiguous;
 import org.apache.hadoop.hdfs.server.blockmanagement.BlockInfoStriped;
 
 import org.apache.hadoop.hdfs.server.blockmanagement.BlockManager;
+import org.apache.hadoop.hdfs.protocol.BlockType;
 import org.apache.hadoop.hdfs.server.blockmanagement.BlockUnderConstructionFeature;
 import org.apache.hadoop.hdfs.server.blockmanagement.DatanodeStorageInfo;
 import org.apache.hadoop.hdfs.server.common.HdfsServerConstants;
+import org.apache.hadoop.hdfs.server.namenode.FSDirectory.DirOp;
 import org.apache.hadoop.hdfs.server.namenode.snapshot.Snapshot;
 import org.apache.hadoop.net.Node;
 import org.apache.hadoop.net.NodeBase;
@@ -123,7 +120,7 @@ class FSDirWriteFileOp {
     FSNamesystem fsn = fsd.getFSNamesystem();
     final INodeFile file = fsn.checkLease(iip, holder, fileId);
     Preconditions.checkState(file.isUnderConstruction());
-    if (file.isStriped()) {
+    if (file.getBlockType() == BlockType.STRIPED) {
       return; // do not abandon block for striped file
     }
 
@@ -166,7 +163,7 @@ class FSDirWriteFileOp {
     final short numTargets;
     final byte storagePolicyID;
     String clientMachine;
-    final boolean isStriped;
+    final BlockType blockType;
 
     INodesInPath iip = fsn.dir.resolvePath(pc, src, fileId);
     FileState fileState = analyzeFileState(fsn, iip, fileId, clientName,
@@ -190,10 +187,11 @@ class FSDirWriteFileOp {
     blockSize = pendingFile.getPreferredBlockSize();
     clientMachine = pendingFile.getFileUnderConstructionFeature()
         .getClientMachine();
-    isStriped = pendingFile.isStriped();
+    blockType = pendingFile.getBlockType();
     ErasureCodingPolicy ecPolicy = null;
-    if (isStriped) {
-      ecPolicy = FSDirErasureCodingOp.getErasureCodingPolicy(fsn, src);
+    if (blockType == BlockType.STRIPED) {
+      ecPolicy =
+          FSDirErasureCodingOp.unprotectedGetErasureCodingPolicy(fsn, iip);
       numTargets = (short) (ecPolicy.getSchema().getNumDataUnits()
           + ecPolicy.getSchema().getNumParityUnits());
     } else {
@@ -201,7 +199,7 @@ class FSDirWriteFileOp {
     }
     storagePolicyID = pendingFile.getStoragePolicyID();
     return new ValidateAddBlockResult(blockSize, numTargets, storagePolicyID,
-                                      clientMachine, isStriped);
+                                      clientMachine, blockType);
   }
 
   static LocatedBlock makeLocatedBlock(FSNamesystem fsn, BlockInfo blk,
@@ -241,7 +239,7 @@ class FSDirWriteFileOp {
         // add new chosen targets to already allocated block and return
         BlockInfo lastBlockInFile = pendingFile.getLastBlock();
         lastBlockInFile.getUnderConstructionFeature().setExpectedLocations(
-            lastBlockInFile, targets, pendingFile.isStriped());
+            lastBlockInFile, targets, pendingFile.getBlockType());
         offset = pendingFile.computeFileSize();
         return makeLocatedBlock(fsn, lastBlockInFile, targets, offset);
       }
@@ -252,11 +250,11 @@ class FSDirWriteFileOp {
                                   ExtendedBlock.getLocalBlock(previous));
 
     // allocate new block, record block locations in INode.
-    final boolean isStriped = pendingFile.isStriped();
+    final BlockType blockType = pendingFile.getBlockType();
     // allocate new block, record block locations in INode.
-    Block newBlock = fsn.createNewBlock(isStriped);
+    Block newBlock = fsn.createNewBlock(blockType);
     INodesInPath inodesInPath = INodesInPath.fromINode(pendingFile);
-    saveAllocatedBlock(fsn, src, inodesInPath, newBlock, targets, isStriped);
+    saveAllocatedBlock(fsn, src, inodesInPath, newBlock, targets, blockType);
 
     persistNewBlock(fsn, src, pendingFile);
     offset = pendingFile.computeFileSize();
@@ -286,7 +284,7 @@ class FSDirWriteFileOp {
     return bm.chooseTarget4NewBlock(src, r.numTargets, clientNode,
                                     excludedNodesSet, r.blockSize,
                                     favoredNodesList, r.storagePolicyID,
-                                    r.isStriped, flags);
+                                    r.blockType, flags);
   }
 
   /**
@@ -307,6 +305,37 @@ class FSDirWriteFileOp {
     return clientNode;
   }
 
+  static INodesInPath resolvePathForStartFile(FSDirectory dir,
+      FSPermissionChecker pc, String src, EnumSet<CreateFlag> flag,
+      boolean createParent) throws IOException {
+    INodesInPath iip = dir.resolvePath(pc, src, DirOp.CREATE);
+    if (dir.isPermissionEnabled()) {
+      dir.checkAncestorAccess(pc, iip, FsAction.WRITE);
+    }
+    INode inode = iip.getLastINode();
+    if (inode != null) {
+      // Verify that the destination does not exist as a directory already.
+      if (inode.isDirectory()) {
+        throw new FileAlreadyExistsException(iip.getPath() +
+            " already exists as a directory");
+      }
+      // Verifies it's indeed a file and perms allow overwrite
+      INodeFile.valueOf(inode, src);
+      if (dir.isPermissionEnabled() && flag.contains(CreateFlag.OVERWRITE)) {
+        dir.checkPathAccess(pc, iip, FsAction.WRITE);
+      }
+    } else {
+      if (!createParent) {
+        dir.verifyParentDir(iip);
+      }
+      if (!flag.contains(CreateFlag.CREATE)) {
+        throw new FileNotFoundException("Can't overwrite non-existent " + src);
+      }
+    }
+    return iip;
+  }
+
+
   /**
    * Create a new file or overwrite an existing file<br>
    *
@@ -317,88 +346,21 @@ class FSDirWriteFileOp {
    * {@link ClientProtocol#create}
    */
   static HdfsFileStatus startFile(
-      FSNamesystem fsn, FSPermissionChecker pc, String src,
+      FSNamesystem fsn, INodesInPath iip,
       PermissionStatus permissions, String holder, String clientMachine,
       EnumSet<CreateFlag> flag, boolean createParent,
       short replication, long blockSize,
-      EncryptionKeyInfo ezInfo, INode.BlocksMapUpdateInfo toRemoveBlocks,
+      FileEncryptionInfo feInfo, INode.BlocksMapUpdateInfo toRemoveBlocks,
       boolean logRetryEntry)
       throws IOException {
     assert fsn.hasWriteLock();
-
-    boolean create = flag.contains(CreateFlag.CREATE);
     boolean overwrite = flag.contains(CreateFlag.OVERWRITE);
     boolean isLazyPersist = flag.contains(CreateFlag.LAZY_PERSIST);
 
-    CipherSuite suite = null;
-    CryptoProtocolVersion version = null;
-    KeyProviderCryptoExtension.EncryptedKeyVersion edek = null;
-
-    if (ezInfo != null) {
-      edek = ezInfo.edek;
-      suite = ezInfo.suite;
-      version = ezInfo.protocolVersion;
-    }
-
+    final String src = iip.getPath();
     FSDirectory fsd = fsn.getFSDirectory();
-    INodesInPath iip = fsd.resolvePathForWrite(pc, src);
-    src = iip.getPath();
 
-    // Verify that the destination does not exist as a directory already.
-    final INode inode = iip.getLastINode();
-    if (inode != null && inode.isDirectory()) {
-      throw new FileAlreadyExistsException(src +
-          " already exists as a directory");
-    }
-
-    if (FSDirectory.isExactReservedName(src) || (FSDirectory.isReservedName(src)
-        && !FSDirectory.isReservedRawName(src)
-        && !FSDirectory.isReservedInodesName(src))) {
-      throw new InvalidPathException(src);
-    }
-
-    final INodeFile myFile = INodeFile.valueOf(inode, src, true);
-    if (fsd.isPermissionEnabled()) {
-      if (overwrite && myFile != null) {
-        fsd.checkPathAccess(pc, iip, FsAction.WRITE);
-      }
-      /*
-       * To overwrite existing file, need to check 'w' permission
-       * of parent (equals to ancestor in this case)
-       */
-      fsd.checkAncestorAccess(pc, iip, FsAction.WRITE);
-    }
-
-    if (!createParent) {
-      fsd.verifyParentDir(iip, src);
-    }
-
-    if (myFile == null && !create) {
-      throw new FileNotFoundException("Can't overwrite non-existent " +
-          src + " for client " + clientMachine);
-    }
-
-    FileEncryptionInfo feInfo = null;
-
-    final EncryptionZone zone = FSDirEncryptionZoneOp.getEZForPath(fsd, iip);
-    if (zone != null) {
-      // The path is now within an EZ, but we're missing encryption parameters
-      if (suite == null || edek == null) {
-        throw new RetryStartFileException();
-      }
-      // Path is within an EZ and we have provided encryption parameters.
-      // Make sure that the generated EDEK matches the settings of the EZ.
-      final String ezKeyName = zone.getKeyName();
-      if (!ezKeyName.equals(edek.getEncryptionKeyName())) {
-        throw new RetryStartFileException();
-      }
-      feInfo = new FileEncryptionInfo(suite, version,
-          edek.getEncryptedKeyVersion().getMaterial(),
-          edek.getEncryptedKeyIv(),
-          ezKeyName, edek.getEncryptionKeyVersionName());
-    }
-
-    if (myFile != null) {
+    if (iip.getLastINode() != null) {
       if (overwrite) {
         List<INode> toRemoveINodes = new ChunkedArrayList<>();
         List<Long> toRemoveUCFiles = new ChunkedArrayList<>();
@@ -433,41 +395,15 @@ class FSDirWriteFileOp {
         newNode.getFileUnderConstructionFeature().getClientName(),
         newNode.getId());
     if (feInfo != null) {
-      FSDirEncryptionZoneOp.setFileEncryptionInfo(fsd, src, feInfo);
-      newNode = fsd.getInode(newNode.getId()).asFile();
+      FSDirEncryptionZoneOp.setFileEncryptionInfo(fsd, iip, feInfo);
     }
-    setNewINodeStoragePolicy(fsd.getBlockManager(), newNode, iip,
-                             isLazyPersist);
+    setNewINodeStoragePolicy(fsd.getBlockManager(), iip, isLazyPersist);
     fsd.getEditLog().logOpenFile(src, newNode, overwrite, logRetryEntry);
     if (NameNode.stateChangeLog.isDebugEnabled()) {
       NameNode.stateChangeLog.debug("DIR* NameSystem.startFile: added " +
           src + " inode " + newNode.getId() + " " + holder);
     }
     return FSDirStatAndListingOp.getFileInfo(fsd, iip);
-  }
-
-  static EncryptionKeyInfo getEncryptionKeyInfo(FSNamesystem fsn,
-      FSPermissionChecker pc, String src,
-      CryptoProtocolVersion[] supportedVersions)
-      throws IOException {
-    FSDirectory fsd = fsn.getFSDirectory();
-    INodesInPath iip = fsd.resolvePathForWrite(pc, src);
-    // Nothing to do if the path is not within an EZ
-    final EncryptionZone zone = FSDirEncryptionZoneOp.getEZForPath(fsd, iip);
-    if (zone == null) {
-      return null;
-    }
-    CryptoProtocolVersion protocolVersion = fsn.chooseProtocolVersion(
-        zone, supportedVersions);
-    CipherSuite suite = zone.getSuite();
-    String ezKeyName = zone.getKeyName();
-
-    Preconditions.checkNotNull(protocolVersion);
-    Preconditions.checkNotNull(suite);
-    Preconditions.checkArgument(!suite.equals(CipherSuite.UNKNOWN),
-                                "Chose an UNKNOWN CipherSuite!");
-    Preconditions.checkNotNull(ezKeyName);
-    return new EncryptionKeyInfo(protocolVersion, suite, ezKeyName);
   }
 
   static INodeFile addFileForEditLog(
@@ -481,22 +417,29 @@ class FSDirWriteFileOp {
     assert fsd.hasWriteLock();
     try {
       // check if the file has an EC policy
+      boolean isStriped = false;
       ErasureCodingPolicy ecPolicy = FSDirErasureCodingOp.
-          getErasureCodingPolicy(fsd.getFSNamesystem(), existing);
+          unprotectedGetErasureCodingPolicy(fsd.getFSNamesystem(), existing);
       if (ecPolicy != null) {
-        replication = ecPolicy.getId();
+        isStriped = true;
       }
+      final BlockType blockType = isStriped ?
+          BlockType.STRIPED : BlockType.CONTIGUOUS;
+      final Short replicationFactor = (!isStriped ? replication : null);
+      final Byte ecPolicyID = (isStriped ? ecPolicy.getId() : null);
       if (underConstruction) {
         newNode = newINodeFile(id, permissions, modificationTime,
-            modificationTime, replication, preferredBlockSize, storagePolicyId,
-            ecPolicy != null);
+            modificationTime, replicationFactor, ecPolicyID, preferredBlockSize,
+            storagePolicyId, blockType);
         newNode.toUnderConstruction(clientName, clientMachine);
       } else {
         newNode = newINodeFile(id, permissions, modificationTime, atime,
-            replication, preferredBlockSize, storagePolicyId, ecPolicy != null);
+            replicationFactor, ecPolicyID, preferredBlockSize,
+            storagePolicyId, blockType);
       }
       newNode.setLocalName(localName);
-      INodesInPath iip = fsd.addINode(existing, newNode);
+      INodesInPath iip = fsd.addINode(existing, newNode,
+          permissions.getPermission());
       if (iip != null) {
         if (aclEntries != null) {
           AclStorage.updateINodeAcl(newNode, aclEntries, CURRENT_STATE_ID);
@@ -524,7 +467,7 @@ class FSDirWriteFileOp {
    */
   private static BlockInfo addBlock(FSDirectory fsd, String path,
       INodesInPath inodesInPath, Block block, DatanodeStorageInfo[] targets,
-      boolean isStriped) throws IOException {
+      BlockType blockType) throws IOException {
     fsd.writeLock();
     try {
       final INodeFile fileINode = inodesInPath.getLastINode().asFile();
@@ -532,9 +475,10 @@ class FSDirWriteFileOp {
 
       // associate new last block for the file
       final BlockInfo blockInfo;
-      if (isStriped) {
-        ErasureCodingPolicy ecPolicy = FSDirErasureCodingOp.getErasureCodingPolicy(
-            fsd.getFSNamesystem(), inodesInPath);
+      if (blockType == BlockType.STRIPED) {
+        ErasureCodingPolicy ecPolicy =
+            FSDirErasureCodingOp.unprotectedGetErasureCodingPolicy(
+                fsd.getFSNamesystem(), inodesInPath);
         short numDataUnits = (short) ecPolicy.getNumDataUnits();
         short numParityUnits = (short) ecPolicy.getNumParityUnits();
         short numLocations = (short) (numDataUnits + numParityUnits);
@@ -585,16 +529,22 @@ class FSDirWriteFileOp {
     INodesInPath newiip;
     fsd.writeLock();
     try {
+      boolean isStriped = false;
       ErasureCodingPolicy ecPolicy = FSDirErasureCodingOp.
-          getErasureCodingPolicy(fsd.getFSNamesystem(), existing);
+          unprotectedGetErasureCodingPolicy(fsd.getFSNamesystem(), existing);
       if (ecPolicy != null) {
-        replication = ecPolicy.getId();
+        isStriped = true;
       }
+      final BlockType blockType = isStriped ?
+          BlockType.STRIPED : BlockType.CONTIGUOUS;
+      final Short replicationFactor = (!isStriped ? replication : null);
+      final Byte ecPolicyID = (isStriped ? ecPolicy.getId() : null);
       INodeFile newNode = newINodeFile(fsd.allocateNewInodeId(), permissions,
-          modTime, modTime, replication, preferredBlockSize, ecPolicy != null);
+          modTime, modTime, replicationFactor, ecPolicyID, preferredBlockSize,
+          blockType);
       newNode.setLocalName(localName);
       newNode.toUnderConstruction(clientName, clientMachine);
-      newiip = fsd.addINode(existing, newNode);
+      newiip = fsd.addINode(existing, newNode, permissions.getPermission());
     } finally {
       fsd.writeUnlock();
     }
@@ -762,18 +712,18 @@ class FSDirWriteFileOp {
 
   private static INodeFile newINodeFile(
       long id, PermissionStatus permissions, long mtime, long atime,
-      short replication, long preferredBlockSize, byte storagePolicyId,
-      boolean isStriped) {
+      Short replication, Byte ecPolicyID, long preferredBlockSize,
+      byte storagePolicyId, BlockType blockType) {
     return new INodeFile(id, null, permissions, mtime, atime,
-        BlockInfo.EMPTY_ARRAY, replication, preferredBlockSize,
-        storagePolicyId, isStriped);
+        BlockInfo.EMPTY_ARRAY, replication, ecPolicyID, preferredBlockSize,
+        storagePolicyId, blockType);
   }
 
   private static INodeFile newINodeFile(long id, PermissionStatus permissions,
-      long mtime, long atime, short replication, long preferredBlockSize,
-      boolean isStriped) {
-    return newINodeFile(id, permissions, mtime, atime, replication,
-        preferredBlockSize, (byte)0, isStriped);
+      long mtime, long atime, Short replication, Byte ecPolicyID,
+      long preferredBlockSize, BlockType blockType) {
+    return newINodeFile(id, permissions, mtime, atime, replication, ecPolicyID,
+        preferredBlockSize, (byte)0, blockType);
   }
 
   /**
@@ -803,10 +753,10 @@ class FSDirWriteFileOp {
    */
   private static void saveAllocatedBlock(FSNamesystem fsn, String src,
       INodesInPath inodesInPath, Block newBlock, DatanodeStorageInfo[] targets,
-      boolean isStriped) throws IOException {
+      BlockType blockType) throws IOException {
     assert fsn.hasWriteLock();
     BlockInfo b = addBlock(fsn.dir, src, inodesInPath, newBlock, targets,
-        isStriped);
+        blockType);
     logAllocatedBlock(src, b);
     DatanodeStorageInfo.incrementBlocksScheduled(targets);
   }
@@ -827,10 +777,9 @@ class FSDirWriteFileOp {
     NameNode.stateChangeLog.info(sb.toString());
   }
 
-  private static void setNewINodeStoragePolicy(BlockManager bm, INodeFile
-      inode, INodesInPath iip, boolean isLazyPersist)
-      throws IOException {
-
+  private static void setNewINodeStoragePolicy(BlockManager bm,
+      INodesInPath iip, boolean isLazyPersist) throws IOException {
+    INodeFile inode = iip.getLastINode().asFile();
     if (isLazyPersist) {
       BlockStoragePolicy lpPolicy =
           bm.getStoragePolicy("LAZY_PERSIST");
@@ -874,31 +823,16 @@ class FSDirWriteFileOp {
     final int numTargets;
     final byte storagePolicyID;
     final String clientMachine;
-    final boolean isStriped;
+    final BlockType blockType;
 
     ValidateAddBlockResult(
         long blockSize, int numTargets, byte storagePolicyID,
-        String clientMachine, boolean isStriped) {
+        String clientMachine, BlockType blockType) {
       this.blockSize = blockSize;
       this.numTargets = numTargets;
       this.storagePolicyID = storagePolicyID;
       this.clientMachine = clientMachine;
-      this.isStriped = isStriped;
-    }
-  }
-
-  static class EncryptionKeyInfo {
-    final CryptoProtocolVersion protocolVersion;
-    final CipherSuite suite;
-    final String ezKeyName;
-    KeyProviderCryptoExtension.EncryptedKeyVersion edek;
-
-    EncryptionKeyInfo(
-        CryptoProtocolVersion protocolVersion, CipherSuite suite,
-        String ezKeyName) {
-      this.protocolVersion = protocolVersion;
-      this.suite = suite;
-      this.ezKeyName = ezKeyName;
+      this.blockType = blockType;
     }
   }
 }

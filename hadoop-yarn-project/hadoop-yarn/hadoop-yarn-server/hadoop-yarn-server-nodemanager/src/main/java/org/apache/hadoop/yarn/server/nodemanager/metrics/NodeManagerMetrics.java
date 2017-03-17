@@ -23,6 +23,7 @@ import org.apache.hadoop.metrics2.annotation.Metrics;
 import org.apache.hadoop.metrics2.lib.DefaultMetricsSystem;
 import org.apache.hadoop.metrics2.lib.MutableCounterInt;
 import org.apache.hadoop.metrics2.lib.MutableGaugeInt;
+import org.apache.hadoop.metrics2.lib.MutableGaugeLong;
 import org.apache.hadoop.metrics2.lib.MutableRate;
 import org.apache.hadoop.metrics2.source.JvmMetrics;
 import org.apache.hadoop.yarn.api.records.Resource;
@@ -31,10 +32,14 @@ import com.google.common.annotations.VisibleForTesting;
 
 @Metrics(about="Metrics for node manager", context="yarn")
 public class NodeManagerMetrics {
+  // CHECKSTYLE:OFF:VisibilityModifier
   @Metric MutableCounterInt containersLaunched;
   @Metric MutableCounterInt containersCompleted;
   @Metric MutableCounterInt containersFailed;
   @Metric MutableCounterInt containersKilled;
+  @Metric MutableCounterInt containersRolledBackOnFailure;
+  @Metric("# of reInitializing containers")
+      MutableGaugeInt containersReIniting;
   @Metric("# of initializing containers")
       MutableGaugeInt containersIniting;
   @Metric MutableGaugeInt containersRunning;
@@ -57,10 +62,20 @@ public class NodeManagerMetrics {
   @Metric("Disk utilization % on good log dirs")
       MutableGaugeInt goodLogDirsDiskUtilizationPerc;
 
+  @Metric("Current allocated memory by opportunistic containers in GB")
+      MutableGaugeLong allocatedOpportunisticGB;
+  @Metric("Current allocated Virtual Cores by opportunistic containers")
+      MutableGaugeInt allocatedOpportunisticVCores;
+  @Metric("# of running opportunistic containers")
+      MutableGaugeInt runningOpportunisticContainers;
+
+  // CHECKSTYLE:ON:VisibilityModifier
+
   private JvmMetrics jvmMetrics = null;
 
   private long allocatedMB;
   private long availableMB;
+  private long allocatedOpportunisticMB;
 
   public NodeManagerMetrics(JvmMetrics jvmMetrics) {
     this.jvmMetrics = jvmMetrics;
@@ -89,6 +104,10 @@ public class NodeManagerMetrics {
     containersCompleted.incr();
   }
 
+  public void rollbackContainerOnFailure() {
+    containersRolledBackOnFailure.incr();
+  }
+
   public void failedContainer() {
     containersFailed.incr();
   }
@@ -111,6 +130,14 @@ public class NodeManagerMetrics {
 
   public void endRunningContainer() {
     containersRunning.decr();
+  }
+
+  public void reInitingContainer() {
+    containersReIniting.incr();
+  }
+
+  public void endReInitingContainer() {
+    containersReIniting.decr();
   }
 
   public void allocateContainer(Resource res) {
@@ -142,6 +169,22 @@ public class NodeManagerMetrics {
     availableGB.set((int)Math.floor(availableMB/1024d));
     allocatedVCores.incr(deltaVCores);
     availableVCores.decr(deltaVCores);
+  }
+
+  public void startOpportunisticContainer(Resource res) {
+    runningOpportunisticContainers.incr();
+    allocatedOpportunisticMB = allocatedOpportunisticMB + res.getMemorySize();
+    allocatedOpportunisticGB
+        .set((int) Math.ceil(allocatedOpportunisticMB / 1024d));
+    allocatedOpportunisticVCores.incr(res.getVirtualCores());
+  }
+
+  public void completeOpportunisticContainer(Resource res) {
+    runningOpportunisticContainers.decr();
+    allocatedOpportunisticMB = allocatedOpportunisticMB - res.getMemorySize();
+    allocatedOpportunisticGB
+        .set((int) Math.ceil(allocatedOpportunisticMB / 1024d));
+    allocatedOpportunisticVCores.decr(res.getVirtualCores());
   }
 
   public void addResource(Resource res) {
@@ -211,4 +254,25 @@ public class NodeManagerMetrics {
     return goodLocalDirsDiskUtilizationPerc.value();
   }
 
+  @VisibleForTesting
+  public int getReInitializingContainer() {
+    return containersReIniting.value();
+  }
+
+  @VisibleForTesting
+  public int getContainersRolledbackOnFailure() {
+    return containersRolledBackOnFailure.value();
+  }
+
+  public long getAllocatedOpportunisticGB() {
+    return allocatedOpportunisticGB.value();
+  }
+
+  public int getAllocatedOpportunisticVCores() {
+    return allocatedOpportunisticVCores.value();
+  }
+
+  public int getRunningOpportunisticContainers() {
+    return runningOpportunisticContainers.value();
+  }
 }

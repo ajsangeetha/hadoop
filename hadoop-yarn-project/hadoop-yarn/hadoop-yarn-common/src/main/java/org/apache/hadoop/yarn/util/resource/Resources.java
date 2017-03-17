@@ -143,6 +143,16 @@ public class Resources {
   public static Resource none() {
     return NONE;
   }
+
+  /**
+   * Check whether a resource object is empty (0 memory and 0 virtual cores).
+   * @param other The resource to check
+   * @return {@code true} if {@code other} has 0 memory and 0 virtual cores,
+   * {@code false} otherwise
+   */
+  public static boolean isNone(Resource other) {
+    return NONE.equals(other);
+  }
   
   public static Resource unbounded() {
     return UNBOUNDED;
@@ -170,6 +180,24 @@ public class Resources {
 
   public static Resource subtract(Resource lhs, Resource rhs) {
     return subtractFrom(clone(lhs), rhs);
+  }
+
+  /**
+   * Subtract <code>rhs</code> from <code>lhs</code> and reset any negative
+   * values to zero.
+   * @param lhs {@link Resource} to subtract from
+   * @param rhs {@link Resource} to subtract
+   * @return the value of lhs after subtraction
+   */
+  public static Resource subtractFromNonNegative(Resource lhs, Resource rhs) {
+    subtractFrom(lhs, rhs);
+    if (lhs.getMemorySize() < 0) {
+      lhs.setMemorySize(0);
+    }
+    if (lhs.getVirtualCores() < 0) {
+      lhs.setVirtualCores(0);
+    }
+    return lhs;
   }
 
   public static Resource negate(Resource resource) {
@@ -212,6 +240,13 @@ public class Resources {
     Resource out = clone(lhs);
     out.setMemorySize((long)(lhs.getMemorySize() * by));
     out.setVirtualCores((int)(lhs.getVirtualCores() * by));
+    return out;
+  }
+
+  public static Resource multiplyAndRoundUp(Resource lhs, double by) {
+    Resource out = clone(lhs);
+    out.setMemorySize((long)Math.ceil(lhs.getMemorySize() * by));
+    out.setVirtualCores((int)Math.ceil(lhs.getVirtualCores() * by));
     return out;
   }
   

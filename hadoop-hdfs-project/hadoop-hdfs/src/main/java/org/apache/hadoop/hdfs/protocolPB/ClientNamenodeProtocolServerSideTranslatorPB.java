@@ -25,6 +25,8 @@ import java.util.List;
 import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.classification.InterfaceStability;
 import org.apache.hadoop.fs.BatchedRemoteIterator.BatchedEntries;
+import org.apache.hadoop.fs.permission.FsCreateModes;
+import org.apache.hadoop.fs.permission.FsPermission;
 import org.apache.hadoop.hdfs.AddBlockFlag;
 import org.apache.hadoop.fs.ContentSummary;
 import org.apache.hadoop.fs.CreateFlag;
@@ -213,6 +215,8 @@ import org.apache.hadoop.hdfs.protocol.proto.ErasureCodingProtos.GetErasureCodin
 import org.apache.hadoop.hdfs.protocol.proto.ErasureCodingProtos.GetErasureCodingPolicyResponseProto;
 import org.apache.hadoop.hdfs.protocol.proto.ErasureCodingProtos.SetErasureCodingPolicyRequestProto;
 import org.apache.hadoop.hdfs.protocol.proto.ErasureCodingProtos.SetErasureCodingPolicyResponseProto;
+import org.apache.hadoop.hdfs.protocol.proto.ErasureCodingProtos.UnsetErasureCodingPolicyRequestProto;
+import org.apache.hadoop.hdfs.protocol.proto.ErasureCodingProtos.UnsetErasureCodingPolicyResponseProto;
 import org.apache.hadoop.hdfs.protocol.proto.HdfsProtos.BlockStoragePolicyProto;
 import org.apache.hadoop.hdfs.protocol.proto.HdfsProtos.DatanodeIDProto;
 import org.apache.hadoop.hdfs.protocol.proto.HdfsProtos.DatanodeInfoProto;
@@ -411,8 +415,12 @@ public class ClientNamenodeProtocolServerSideTranslatorPB implements
   public CreateResponseProto create(RpcController controller,
       CreateRequestProto req) throws ServiceException {
     try {
+      FsPermission masked = req.hasUnmasked() ?
+          FsCreateModes.create(PBHelperClient.convert(req.getMasked()),
+              PBHelperClient.convert(req.getUnmasked())) :
+          PBHelperClient.convert(req.getMasked());
       HdfsFileStatus result = server.create(req.getSrc(),
-          PBHelperClient.convert(req.getMasked()), req.getClientName(),
+          masked, req.getClientName(),
           PBHelperClient.convertCreateFlag(req.getCreateFlag()), req.getCreateParent(),
           (short) req.getReplication(), req.getBlockSize(),
           PBHelperClient.convertCryptoProtocolVersions(
@@ -651,8 +659,12 @@ public class ClientNamenodeProtocolServerSideTranslatorPB implements
   public MkdirsResponseProto mkdirs(RpcController controller,
       MkdirsRequestProto req) throws ServiceException {
     try {
-      boolean result = server.mkdirs(req.getSrc(),
-          PBHelperClient.convert(req.getMasked()), req.getCreateParent());
+      FsPermission masked = req.hasUnmasked() ?
+          FsCreateModes.create(PBHelperClient.convert(req.getMasked()),
+              PBHelperClient.convert(req.getUnmasked())) :
+          PBHelperClient.convert(req.getMasked());
+      boolean result = server.mkdirs(req.getSrc(), masked,
+          req.getCreateParent());
       return MkdirsResponseProto.newBuilder().setResult(result).build();
     } catch (IOException e) {
       throw new ServiceException(e);
@@ -1430,10 +1442,20 @@ public class ClientNamenodeProtocolServerSideTranslatorPB implements
       RpcController controller, SetErasureCodingPolicyRequestProto req)
       throws ServiceException {
     try {
-      ErasureCodingPolicy ecPolicy = req.hasEcPolicy() ?
-          PBHelperClient.convertErasureCodingPolicy(req.getEcPolicy()) : null;
-      server.setErasureCodingPolicy(req.getSrc(), ecPolicy);
+      server.setErasureCodingPolicy(req.getSrc(), req.getEcPolicyName());
       return SetErasureCodingPolicyResponseProto.newBuilder().build();
+    } catch (IOException e) {
+      throw new ServiceException(e);
+    }
+  }
+
+  @Override
+  public UnsetErasureCodingPolicyResponseProto unsetErasureCodingPolicy(
+      RpcController controller, UnsetErasureCodingPolicyRequestProto req)
+      throws ServiceException {
+    try {
+      server.unsetErasureCodingPolicy(req.getSrc());
+      return UnsetErasureCodingPolicyResponseProto.newBuilder().build();
     } catch (IOException e) {
       throw new ServiceException(e);
     }

@@ -33,6 +33,7 @@ import java.util.concurrent.ExecutionException;
 import com.google.common.base.Supplier;
 import com.google.common.collect.Lists;
 import org.apache.hadoop.fs.BlockLocation;
+import org.apache.hadoop.fs.CommonConfigurationKeys;
 import org.apache.hadoop.fs.FSDataOutputStream;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
@@ -64,7 +65,7 @@ import org.apache.log4j.Level;
 import org.junit.Assert;
 import org.junit.Ignore;
 import org.junit.Test;
-import org.mortbay.util.ajax.JSON;
+import org.eclipse.jetty.util.ajax.JSON;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -484,7 +485,7 @@ public class TestDecommission extends AdminStatesBaseTest {
       shutdownCluster();
     }
   }
-  
+
   /**
    * Tests cluster storage statistics during decommissioning for non
    * federated cluster
@@ -645,6 +646,53 @@ public class TestDecommission extends AdminStatesBaseTest {
     }
 
     fdos.close();
+  }
+
+  @Test(timeout = 360000)
+  public void testDecommissionWithOpenFileAndBlockRecovery()
+      throws IOException, InterruptedException {
+    startCluster(1, 6);
+    getCluster().waitActive();
+
+    Path file = new Path("/testRecoveryDecommission");
+
+    // Create a file and never close the output stream to trigger recovery
+    DistributedFileSystem dfs = getCluster().getFileSystem();
+    FSDataOutputStream out = dfs.create(file, true,
+        getConf().getInt(CommonConfigurationKeys.IO_FILE_BUFFER_SIZE_KEY, 4096),
+        (short) 3, blockSize);
+
+    // Write data to the file
+    long writtenBytes = 0;
+    while (writtenBytes < fileSize) {
+      out.writeLong(writtenBytes);
+      writtenBytes += 8;
+    }
+    out.hsync();
+
+    DatanodeInfo[] lastBlockLocations = NameNodeAdapter.getBlockLocations(
+      getCluster().getNameNode(), "/testRecoveryDecommission", 0, fileSize)
+      .getLastLocatedBlock().getLocations();
+
+    // Decommission all nodes of the last block
+    ArrayList<String> toDecom = new ArrayList<>();
+    for (DatanodeInfo dnDecom : lastBlockLocations) {
+      toDecom.add(dnDecom.getXferAddr());
+    }
+    initExcludeHosts(toDecom);
+    refreshNodes(0);
+
+    // Make sure hard lease expires to trigger replica recovery
+    getCluster().setLeasePeriod(300L, 300L);
+    Thread.sleep(2 * BLOCKREPORT_INTERVAL_MSEC);
+
+    for (DatanodeInfo dnDecom : lastBlockLocations) {
+      DatanodeInfo datanode = NameNodeAdapter.getDatanode(
+          getCluster().getNamesystem(), dnDecom);
+      waitNodeState(datanode, AdminStates.DECOMMISSIONED);
+    }
+
+    assertEquals(dfs.getFileStatus(file).getLen(), writtenBytes);
   }
   
   /**
@@ -1082,5 +1130,48 @@ public class TestDecommission extends AdminStatesBaseTest {
         "been decommissioned!", initialTotalCapacity != newTotalCapacity);
     assertTrue("BlockPoolUsed should not be the same after a node has " +
         "been decommissioned!",initialBlockPoolUsed != newBlockPoolUsed);
+  }
+
+  /**
+   * Verify if multiple DataNodes can be decommission at the same time.
+   */
+  @Test(timeout = 360000)
+  public void testMultipleNodesDecommission() throws Exception {
+    startCluster(1, 5);
+    final Path file = new Path("/testMultipleNodesDecommission.dat");
+    final FileSystem fileSys = getCluster().getFileSystem(0);
+    final FSNamesystem ns = getCluster().getNamesystem(0);
+
+    int repl = 3;
+    writeFile(fileSys, file, repl, 1);
+    // Request Decommission for DataNodes 1 and 2.
+    List<DatanodeInfo> decomDataNodes = takeNodeOutofService(0,
+        Lists.newArrayList(getCluster().getDataNodes().get(0).getDatanodeUuid(),
+            getCluster().getDataNodes().get(1).getDatanodeUuid()),
+        Long.MAX_VALUE, null, null, AdminStates.DECOMMISSIONED);
+
+    GenericTestUtils.waitFor(new Supplier<Boolean>() {
+      @Override
+      public Boolean get() {
+        try {
+          String errMsg = checkFile(fileSys, file, repl,
+              decomDataNodes.get(0).getXferAddr(), 5);
+          if (errMsg != null) {
+            LOG.warn("Check file: " + errMsg);
+          }
+          return true;
+        } catch (IOException e) {
+          LOG.warn("Check file: " + e);
+          return false;
+        }
+      }
+    }, 500, 30000);
+
+    // Put the decommissioned nodes back in service.
+    for (DatanodeInfo datanodeInfo : decomDataNodes) {
+      putNodeInService(0, datanodeInfo);
+    }
+
+    cleanupFile(fileSys, file);
   }
 }

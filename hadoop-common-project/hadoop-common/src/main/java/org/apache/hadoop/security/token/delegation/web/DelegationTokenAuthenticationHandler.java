@@ -48,8 +48,10 @@ import org.apache.hadoop.security.token.delegation.AbstractDelegationTokenIdenti
 import org.apache.hadoop.security.token.delegation.AbstractDelegationTokenSecretManager;
 import org.apache.hadoop.util.HttpExceptionUtils;
 import org.apache.hadoop.util.StringUtils;
-import org.codehaus.jackson.map.ObjectMapper;
 
+import com.fasterxml.jackson.core.JsonFactory;
+import com.fasterxml.jackson.core.JsonGenerator;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.google.common.annotations.VisibleForTesting;
 
 /**
@@ -89,6 +91,8 @@ public abstract class DelegationTokenAuthenticationHandler
   public static final String DELEGATION_TOKEN_UGI_ATTRIBUTE =
       "hadoop.security.delegation-token.ugi";
 
+  public static final String JSON_MAPPER_PREFIX = PREFIX + "json-mapper.";
+
   static {
     DELEGATION_TOKEN_OPS.add(KerberosDelegationTokenAuthenticator.
         DelegationTokenOperation.GETDELEGATIONTOKEN.toString());
@@ -101,6 +105,7 @@ public abstract class DelegationTokenAuthenticationHandler
   private AuthenticationHandler authHandler;
   private DelegationTokenManager tokenManager;
   private String authType;
+  private JsonFactory jsonFactory;
 
   public DelegationTokenAuthenticationHandler(AuthenticationHandler handler) {
     authHandler = handler;
@@ -112,10 +117,15 @@ public abstract class DelegationTokenAuthenticationHandler
     return tokenManager;
   }
 
+  AuthenticationHandler getAuthHandler() {
+    return authHandler;
+  }
+
   @Override
   public void init(Properties config) throws ServletException {
     authHandler.init(config);
     initTokenManager(config);
+    initJsonFactory(config);
   }
 
   /**
@@ -149,6 +159,30 @@ public abstract class DelegationTokenAuthenticationHandler
     tokenManager.init();
   }
 
+  @VisibleForTesting
+  public void initJsonFactory(Properties config) {
+    boolean hasFeature = false;
+    JsonFactory tmpJsonFactory = new JsonFactory();
+
+    for (Map.Entry entry : config.entrySet()) {
+      String key = (String)entry.getKey();
+      if (key.startsWith(JSON_MAPPER_PREFIX)) {
+        JsonGenerator.Feature feature =
+            JsonGenerator.Feature.valueOf(key.substring(JSON_MAPPER_PREFIX
+                .length()));
+        if (feature != null) {
+          hasFeature = true;
+          boolean enabled = Boolean.parseBoolean((String)entry.getValue());
+          tmpJsonFactory.configure(feature, enabled);
+        }
+      }
+    }
+
+    if (hasFeature) {
+      jsonFactory = tmpJsonFactory;
+    }
+  }
+
   @Override
   public void destroy() {
     tokenManager.destroy();
@@ -162,6 +196,24 @@ public abstract class DelegationTokenAuthenticationHandler
 
   private static final String ENTER = System.getProperty("line.separator");
 
+  /**
+   * This method checks if the given HTTP request corresponds to a management
+   * operation.
+   *
+   * @param request The HTTP request
+   * @return true if the given HTTP request corresponds to a management
+   *         operation false otherwise
+   * @throws IOException In case of I/O error.
+   */
+  protected final boolean isManagementOperation(HttpServletRequest request)
+      throws IOException {
+    String op = ServletUtils.getParameter(request,
+        KerberosDelegationTokenAuthenticator.OP_PARAM);
+    op = (op != null) ? StringUtils.toUpperCase(op) : null;
+    return DELEGATION_TOKEN_OPS.contains(op) &&
+        !request.getMethod().equals("OPTIONS");
+  }
+
   @Override
   @SuppressWarnings("unchecked")
   public boolean managementOperation(AuthenticationToken token,
@@ -171,8 +223,7 @@ public abstract class DelegationTokenAuthenticationHandler
     String op = ServletUtils.getParameter(request,
         KerberosDelegationTokenAuthenticator.OP_PARAM);
     op = (op != null) ? StringUtils.toUpperCase(op) : null;
-    if (DELEGATION_TOKEN_OPS.contains(op) &&
-        !request.getMethod().equals("OPTIONS")) {
+    if (isManagementOperation(request)) {
       KerberosDelegationTokenAuthenticator.DelegationTokenOperation dtOp =
           KerberosDelegationTokenAuthenticator.
               DelegationTokenOperation.valueOf(op);
@@ -277,7 +328,7 @@ public abstract class DelegationTokenAuthenticationHandler
             if (map != null) {
               response.setContentType(MediaType.APPLICATION_JSON);
               Writer writer = response.getWriter();
-              ObjectMapper jsonMapper = new ObjectMapper();
+              ObjectMapper jsonMapper = new ObjectMapper(jsonFactory);
               jsonMapper.writeValue(writer, map);
               writer.write(ENTER);
               writer.flush();

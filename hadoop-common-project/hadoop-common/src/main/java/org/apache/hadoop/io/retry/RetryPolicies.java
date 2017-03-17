@@ -183,6 +183,20 @@ public class RetryPolicies {
       return new RetryAction(RetryAction.RetryDecision.FAIL, 0, "try once " +
           "and fail.");
     }
+
+    @Override
+    public boolean equals(Object obj) {
+      if (obj == this) {
+        return true;
+      } else {
+        return obj != null && obj.getClass() == this.getClass();
+      }
+    }
+
+    @Override
+    public int hashCode() {
+      return this.getClass().hashCode();
+    }
   }
 
   static class RetryForever implements RetryPolicy {
@@ -669,7 +683,8 @@ public class RetryPolicies {
       } else if (e instanceof SocketException
           || (e instanceof IOException && !(e instanceof RemoteException))) {
         if (isIdempotentOrAtMostOnce) {
-          return RetryAction.FAILOVER_AND_RETRY;
+          return new RetryAction(RetryAction.RetryDecision.FAILOVER_AND_RETRY,
+              getFailoverOrRetrySleepTime(retries));
         } else {
           return new RetryAction(RetryAction.RetryDecision.FAIL, 0,
               "the invoked method is not idempotent, and unable to determine "

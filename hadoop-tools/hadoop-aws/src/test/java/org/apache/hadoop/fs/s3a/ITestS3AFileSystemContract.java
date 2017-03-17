@@ -1,4 +1,4 @@
-/**
+/*
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
  * distributed with this work for additional information
@@ -18,6 +18,9 @@
 
 package org.apache.hadoop.fs.s3a;
 
+import org.junit.Before;
+import org.junit.Rule;
+import org.junit.rules.TestName;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.apache.hadoop.conf.Configuration;
@@ -38,20 +41,29 @@ public class ITestS3AFileSystemContract extends FileSystemContractBaseTest {
   protected static final Logger LOG =
       LoggerFactory.getLogger(ITestS3AFileSystemContract.class);
 
+  private Path basePath;
+
+  @Rule
+  public TestName methodName = new TestName();
+
+  @Before
+  public void nameThread() {
+    Thread.currentThread().setName("JUnit-" + methodName.getMethodName());
+  }
+
   @Override
   public void setUp() throws Exception {
     Configuration conf = new Configuration();
 
     fs = S3ATestUtils.createTestFileSystem(conf);
+    basePath = fs.makeQualified(
+        S3ATestUtils.createTestPath(new Path("s3afilesystemcontract")));
     super.setUp();
   }
 
   @Override
-  protected void tearDown() throws Exception {
-    if (fs != null) {
-      fs.delete(path("test"), true);
-    }
-    super.tearDown();
+  public Path getTestBaseDir() {
+    return basePath;
   }
 
   @Override
@@ -60,42 +72,27 @@ public class ITestS3AFileSystemContract extends FileSystemContractBaseTest {
   }
 
   @Override
-  public void testRenameFileAsExistingFile() throws Exception {
-    if (!renameSupported()) {
-      return;
-    }
-
-    Path src = path("/test/hadoop/file");
-    createFile(src);
-    Path dst = path("/test/new/newfile");
-    createFile(dst);
-    // s3 doesn't support rename option
-    // rename-overwrites-dest is always allowed.
-    rename(src, dst, true, false, true);
-  }
-
-  @Override
   public void testRenameDirectoryAsExistingDirectory() throws Exception {
     if (!renameSupported()) {
       return;
     }
 
-    Path src = path("/test/hadoop/dir");
+    Path src = path("testRenameDirectoryAsExisting/dir");
     fs.mkdirs(src);
-    createFile(path("/test/hadoop/dir/file1"));
-    createFile(path("/test/hadoop/dir/subdir/file2"));
+    createFile(path(src + "/file1"));
+    createFile(path(src + "/subdir/file2"));
 
-    Path dst = path("/test/new/newdir");
+    Path dst = path("testRenameDirectoryAsExistingNew/newdir");
     fs.mkdirs(dst);
     rename(src, dst, true, false, true);
     assertFalse("Nested file1 exists",
-                fs.exists(path("/test/hadoop/dir/file1")));
+        fs.exists(path(src + "/file1")));
     assertFalse("Nested file2 exists",
-                fs.exists(path("/test/hadoop/dir/subdir/file2")));
+        fs.exists(path(src + "/subdir/file2")));
     assertTrue("Renamed nested file1 exists",
-               fs.exists(path("/test/new/newdir/file1")));
+        fs.exists(path(dst + "/file1")));
     assertTrue("Renamed nested exists",
-               fs.exists(path("/test/new/newdir/subdir/file2")));
+        fs.exists(path(dst + "/subdir/file2")));
   }
 
 //  @Override

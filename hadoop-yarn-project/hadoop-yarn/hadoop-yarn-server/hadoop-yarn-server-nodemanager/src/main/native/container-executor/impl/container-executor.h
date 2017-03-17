@@ -66,7 +66,8 @@ enum errorcodes {
   TRAFFIC_CONTROL_EXECUTION_FAILED = 28,
   DOCKER_RUN_FAILED=29,
   ERROR_OPENING_FILE = 30,
-  ERROR_READING_FILE = 31
+  ERROR_READING_FILE = 31,
+  FEATURE_DISABLED = 32
 };
 
 enum operations {
@@ -94,6 +95,8 @@ enum operations {
 #define BANNED_USERS_KEY "banned.users"
 #define ALLOWED_SYSTEM_USERS_KEY "allowed.system.users"
 #define DOCKER_BINARY_KEY "docker.binary"
+#define DOCKER_SUPPORT_ENABLED_KEY "feature.docker.enabled"
+#define TC_SUPPORT_ENABLED_KEY "feature.tc.enabled"
 #define TMP_DIR "tmp"
 
 extern struct passwd *user_detail;
@@ -261,6 +264,13 @@ int check_dir(const char* npath, mode_t st_mode, mode_t desired,
 int create_validate_dir(const char* npath, mode_t perm, const char* path,
    int finalComponent);
 
+/** Check if a feature is enabled in the specified configuration. */
+int is_feature_enabled(const char* feature_key, int default_value,
+                              struct configuration *cfg);
+
+/** Check if tc (traffic control) support is enabled in configuration. */
+int is_tc_support_enabled();
+
 /**
  * Run a batch of tc commands that modify interface configuration
  */
@@ -280,18 +290,10 @@ int traffic_control_read_state(char *command_file);
  */
 int traffic_control_read_stats(char *command_file);
 
+/** Check if docker support is enabled in configuration. */
+int is_docker_support_enabled();
 
 /**
  * Run a docker command passing the command file as an argument
  */
 int run_docker(const char *command_file);
-
-/**
- * Function to prepare the container directories.
- * It creates the container work and log directories.
- */
-int create_container_directories(const char* user, const char *app_id,
-                     const char *container_id, char* const* local_dir,
-                     char* const* log_dir, const char *work_dir);
-
-int create_log_dirs(const char *app_id, char * const * log_dirs);

@@ -36,6 +36,7 @@ import java.util.HashSet;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
+import java.util.Map.Entry;
 import java.util.Set;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
@@ -55,6 +56,7 @@ import org.apache.hadoop.hdfs.protocol.Block;
 import org.apache.hadoop.hdfs.protocol.DatanodeInfo;
 import org.apache.hadoop.hdfs.protocol.ExtendedBlock;
 import org.apache.hadoop.hdfs.protocol.HdfsConstants;
+import org.apache.hadoop.hdfs.protocol.datatransfer.BlockPinningException;
 import org.apache.hadoop.hdfs.protocol.datatransfer.DataTransferProtoUtil;
 import org.apache.hadoop.hdfs.protocol.datatransfer.IOStreamPair;
 import org.apache.hadoop.hdfs.protocol.datatransfer.Sender;
@@ -66,6 +68,7 @@ import org.apache.hadoop.hdfs.protocol.proto.DataTransferProtos.Status;
 import org.apache.hadoop.hdfs.security.token.block.BlockTokenIdentifier;
 import org.apache.hadoop.hdfs.server.balancer.Dispatcher.DDatanode.StorageGroup;
 import org.apache.hadoop.hdfs.server.blockmanagement.BlockPlacementPolicies;
+import org.apache.hadoop.hdfs.protocol.BlockType;
 import org.apache.hadoop.hdfs.server.protocol.BlocksWithLocations;
 import org.apache.hadoop.hdfs.server.protocol.BlocksWithLocations.BlockWithLocations;
 import org.apache.hadoop.hdfs.server.protocol.BlocksWithLocations.StripedBlockWithLocations;
@@ -85,7 +88,6 @@ import com.google.common.base.Preconditions;
 public class Dispatcher {
   static final Log LOG = LogFactory.getLog(Dispatcher.class);
 
-  private static final int MAX_NO_PENDING_MOVE_ITERATIONS = 5;
   /**
    * the period of time to delay the usage of a DataNode after hitting
    * errors when using it for migrating data
@@ -121,6 +123,12 @@ public class Dispatcher {
 
   private final long getBlocksSize;
   private final long getBlocksMinBlockSize;
+  private final long blockMoveTimeout;
+  /**
+   * If no block can be moved out of a {@link Source} after this configured
+   * amount of time, the Source should give up choosing the next possible move.
+   */
+  private final int maxNoMoveInterval;
 
   private final int ioFileBufferSize;
 
@@ -216,6 +224,10 @@ public class Dispatcher {
     private PendingMove(Source source, StorageGroup target) {
       this.source = source;
       this.target = target;
+    }
+
+    public DatanodeInfo getSource() {
+      return source.getDatanodeInfo();
     }
 
     @Override
@@ -331,6 +343,11 @@ public class Dispatcher {
                 getXferAddr(Dispatcher.this.connectToDnViaHostname)),
                 HdfsConstants.READ_TIMEOUT);
 
+        // Set read timeout so that it doesn't hang forever against
+        // unresponsive nodes. Datanode normally sends IN_PROGRESS response
+        // twice within the client read timeout period (every 30 seconds by
+        // default). Here, we make it give up after 5 minutes of no response.
+        sock.setSoTimeout(HdfsConstants.READ_TIMEOUT * 5);
         sock.setKeepAlive(true);
 
         OutputStream unbufOut = sock.getOutputStream();
@@ -354,8 +371,17 @@ public class Dispatcher {
         target.getDDatanode().setHasSuccess();
         LOG.info("Successfully moved " + this);
       } catch (IOException e) {
-        LOG.warn("Failed to move " + this + ": " + e.getMessage());
+        LOG.warn("Failed to move " + this, e);
         target.getDDatanode().setHasFailure();
+        // Check that the failure is due to block pinning errors.
+        if (e instanceof BlockPinningException) {
+          // Pinned block can't be moved. Add this block into failure list.
+          // Later in the next iteration mover will exclude these blocks from
+          // pending moves.
+          target.getDDatanode().addBlockPinningFailures(this);
+          return;
+        }
+
         // Proxy or target may have some issues, delay before using these nodes
         // further in order to avoid a potential storm of "threads quota
         // exceeded" warnings when the dispatcher gets out of sync with work
@@ -386,16 +412,29 @@ public class Dispatcher {
           source.getDatanodeInfo().getDatanodeUuid(), proxySource.datanode);
     }
 
+    /** Check whether to continue waiting for response */
+    private boolean stopWaitingForResponse(long startTime) {
+      return source.isIterationOver() ||
+          (blockMoveTimeout > 0 &&
+          (Time.monotonicNow() - startTime > blockMoveTimeout));
+    }
+
     /** Receive a reportedBlock copy response from the input stream */
     private void receiveResponse(DataInputStream in) throws IOException {
+      long startTime = Time.monotonicNow();
       BlockOpResponseProto response =
           BlockOpResponseProto.parseFrom(vintPrefixed(in));
       while (response.getStatus() == Status.IN_PROGRESS) {
         // read intermediate responses
         response = BlockOpResponseProto.parseFrom(vintPrefixed(in));
+        // Stop waiting for slow block moves. Even if it stops waiting,
+        // the actual move may continue.
+        if (stopWaitingForResponse(startTime)) {
+          throw new IOException("Block move timed out");
+        }
       }
       String logInfo = "reportedBlock move is failed";
-      DataTransferProtoUtil.checkBlockOpStatus(response, logInfo);
+      DataTransferProtoUtil.checkBlockOpStatus(response, logInfo, true);
     }
 
     /** reset the object */
@@ -576,6 +615,7 @@ public class Dispatcher {
     /** blocks being moved but not confirmed yet */
     private final List<PendingMove> pendings;
     private volatile boolean hasFailure = false;
+    private Map<Long, Set<DatanodeInfo>> blockPinningFailures = new HashMap<>();
     private volatile boolean hasSuccess = false;
     private ExecutorService moveExecutor;
 
@@ -661,6 +701,22 @@ public class Dispatcher {
       this.hasFailure = true;
     }
 
+    void addBlockPinningFailures(PendingMove pendingBlock) {
+      synchronized (blockPinningFailures) {
+        long blockId = pendingBlock.reportedBlock.getBlock().getBlockId();
+        Set<DatanodeInfo> pinnedLocations = blockPinningFailures.get(blockId);
+        if (pinnedLocations == null) {
+          pinnedLocations = new HashSet<>();
+          blockPinningFailures.put(blockId, pinnedLocations);
+        }
+        pinnedLocations.add(pendingBlock.getSource());
+      }
+    }
+
+    Map<Long, Set<DatanodeInfo>> getBlockPinningFailureList() {
+      return blockPinningFailures;
+    }
+
     void setHasSuccess() {
       this.hasSuccess = true;
     }
@@ -671,6 +727,7 @@ public class Dispatcher {
 
     private final List<Task> tasks = new ArrayList<Task>(2);
     private long blocksToReceive = 0L;
+    private final long startTime = Time.monotonicNow();
     /**
      * Source blocks point to the objects in {@link Dispatcher#globalBlocks}
      * because we want to keep one copy of a block and be aware that the
@@ -680,6 +737,13 @@ public class Dispatcher {
 
     private Source(StorageType storageType, long maxSize2Move, DDatanode dn) {
       dn.super(storageType, maxSize2Move);
+    }
+
+    /**
+     * Check if the iteration is over
+     */
+    public boolean isIterationOver() {
+      return (Time.monotonicNow()-startTime > MAX_ITERATION_TIME);
     }
 
     /** Add a task */
@@ -838,28 +902,19 @@ public class Dispatcher {
      * elapsed time of the iteration has exceeded the max time limit.
      */
     private void dispatchBlocks() {
-      final long startTime = Time.monotonicNow();
       this.blocksToReceive = 2 * getScheduledSize();
-      boolean isTimeUp = false;
-      int noPendingMoveIteration = 0;
-      while (!isTimeUp && getScheduledSize() > 0
+      long previousMoveTimestamp = Time.monotonicNow();
+      while (getScheduledSize() > 0 && !isIterationOver()
           && (!srcBlocks.isEmpty() || blocksToReceive > 0)) {
         if (LOG.isTraceEnabled()) {
           LOG.trace(this + " blocksToReceive=" + blocksToReceive
               + ", scheduledSize=" + getScheduledSize()
               + ", srcBlocks#=" + srcBlocks.size());
         }
-        // check if time is up or not
-        if (Time.monotonicNow() - startTime > MAX_ITERATION_TIME) {
-          LOG.info("Time up (max time=" + MAX_ITERATION_TIME/1000
-              + " seconds).  Skipping " + this);
-          isTimeUp = true;
-          continue;
-        }
         final PendingMove p = chooseNextMove();
         if (p != null) {
-          // Reset no pending move counter
-          noPendingMoveIteration=0;
+          // Reset previous move timestamp
+          previousMoveTimestamp = Time.monotonicNow();
           executePendingMove(p);
           continue;
         }
@@ -882,13 +937,11 @@ public class Dispatcher {
             return;
           }
         } else {
-          // source node cannot find a pending block to move, iteration +1
-          noPendingMoveIteration++;
-          // in case no blocks can be moved for source node's task,
-          // jump out of while-loop after 5 iterations.
-          if (noPendingMoveIteration >= MAX_NO_PENDING_MOVE_ITERATIONS) {
-            LOG.info("Failed to find a pending move "  + noPendingMoveIteration
-                + " times.  Skipping " + this);
+          // jump out of while-loop after the configured timeout.
+          long noMoveInterval = Time.monotonicNow() - previousMoveTimestamp;
+          if (noMoveInterval > maxNoMoveInterval) {
+            LOG.info("Failed to find a pending move for "  + noMoveInterval
+                + " ms.  Skipping " + this);
             resetScheduledSize();
           }
         }
@@ -899,8 +952,16 @@ public class Dispatcher {
           synchronized (Dispatcher.this) {
             Dispatcher.this.wait(1000); // wait for targets/sources to be idle
           }
+          // Didn't find a possible move in this iteration of the while loop,
+          // adding a small delay before choosing next move again.
+          Thread.sleep(100);
         } catch (InterruptedException ignored) {
         }
+      }
+
+      if (isIterationOver()) {
+        LOG.info("The maximum iteration time (" + MAX_ITERATION_TIME/1000
+            + " seconds) has been reached. Stopping " + this);
       }
     }
 
@@ -918,16 +979,18 @@ public class Dispatcher {
   /** Constructor called by Mover. */
   public Dispatcher(NameNodeConnector nnc, Set<String> includedNodes,
       Set<String> excludedNodes, long movedWinWidth, int moverThreads,
-      int dispatcherThreads, int maxConcurrentMovesPerNode, Configuration conf) {
+      int dispatcherThreads, int maxConcurrentMovesPerNode,
+      int maxNoMoveInterval, Configuration conf) {
     this(nnc, includedNodes, excludedNodes, movedWinWidth,
         moverThreads, dispatcherThreads, maxConcurrentMovesPerNode,
-        0L, 0L, conf);
+        0L, 0L, 0, maxNoMoveInterval, conf);
   }
 
   Dispatcher(NameNodeConnector nnc, Set<String> includedNodes,
       Set<String> excludedNodes, long movedWinWidth, int moverThreads,
       int dispatcherThreads, int maxConcurrentMovesPerNode,
-      long getBlocksSize, long getBlocksMinBlockSize, Configuration conf) {
+      long getBlocksSize, long getBlocksMinBlockSize,
+      int blockMoveTimeout, int maxNoMoveInterval, Configuration conf) {
     this.nnc = nnc;
     this.excludedNodes = excludedNodes;
     this.includedNodes = includedNodes;
@@ -942,6 +1005,8 @@ public class Dispatcher {
 
     this.getBlocksSize = getBlocksSize;
     this.getBlocksMinBlockSize = getBlocksMinBlockSize;
+    this.blockMoveTimeout = blockMoveTimeout;
+    this.maxNoMoveInterval = maxNoMoveInterval;
 
     this.saslClient = new SaslDataTransferClient(conf,
         DataTransferSaslUtil.getSaslPropertiesResolver(conf),
@@ -989,20 +1054,17 @@ public class Dispatcher {
   }
 
   private boolean shouldIgnore(DatanodeInfo dn) {
-    // ignore decommissioned nodes
-    final boolean decommissioned = dn.isDecommissioned();
-    // ignore decommissioning nodes
-    final boolean decommissioning = dn.isDecommissionInProgress();
+    // ignore out-of-service nodes
+    final boolean outOfService = !dn.isInService();
     // ignore nodes in exclude list
     final boolean excluded = Util.isExcluded(excludedNodes, dn);
     // ignore nodes not in the include list (if include list is not empty)
     final boolean notIncluded = !Util.isIncluded(includedNodes, dn);
 
-    if (decommissioned || decommissioning || excluded || notIncluded) {
+    if (outOfService || excluded || notIncluded) {
       if (LOG.isTraceEnabled()) {
         LOG.trace("Excluding datanode " + dn
-            + ": decommissioned=" + decommissioned
-            + ", decommissioning=" + decommissioning
+            + ": outOfService=" + outOfService
             + ", excluded=" + excluded
             + ", notIncluded=" + notIncluded);
       }
@@ -1045,6 +1107,8 @@ public class Dispatcher {
     }
     if (moveExecutor == null) {
       LOG.warn("No mover threads available: skip moving " + p);
+      targetDn.removePendingBlock(p);
+      p.proxySource.removePendingBlock(p);
       return;
     }
     moveExecutor.execute(new Runnable() {
@@ -1125,6 +1189,34 @@ public class Dispatcher {
   }
 
   /**
+   * Check any of the block movements are failed due to block pinning errors. If
+   * yes, add the failed blockId and its respective source node location to the
+   * excluded list.
+   */
+  public static void checkForBlockPinningFailures(
+      Map<Long, Set<DatanodeInfo>> excludedPinnedBlocks,
+      Iterable<? extends StorageGroup> targets) {
+    for (StorageGroup t : targets) {
+      Map<Long, Set<DatanodeInfo>> blockPinningFailureList = t.getDDatanode()
+          .getBlockPinningFailureList();
+      Set<Entry<Long, Set<DatanodeInfo>>> entrySet = blockPinningFailureList
+          .entrySet();
+      for (Entry<Long, Set<DatanodeInfo>> entry : entrySet) {
+        Long blockId = entry.getKey();
+        Set<DatanodeInfo> locs = excludedPinnedBlocks.get(blockId);
+        if (locs == null) {
+          // blockId doesn't exists in the excluded list.
+          locs = entry.getValue();
+          excludedPinnedBlocks.put(blockId, locs);
+        } else {
+          // blockId already exists in the excluded list, add the pinned node.
+          locs.addAll(entry.getValue());
+        }
+      }
+    }
+  }
+
+  /**
    * @return true if some moves are success.
    */
   public static boolean checkForSuccess(
@@ -1184,7 +1276,7 @@ public class Dispatcher {
       }
       datanodeInfos.add(target.getDatanodeInfo());
     }
-    return placementPolicies.getPolicy(false).isMovable(
+    return placementPolicies.getPolicy(BlockType.CONTIGUOUS).isMovable(
         datanodeInfos, source.getDatanodeInfo(), target.getDatanodeInfo());
   }
 

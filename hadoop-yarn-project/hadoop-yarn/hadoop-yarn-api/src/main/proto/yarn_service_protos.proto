@@ -63,7 +63,8 @@ message FinishApplicationMasterResponseProto {
 enum ContainerUpdateTypeProto {
   INCREASE_RESOURCE = 0;
   DECREASE_RESOURCE = 1;
-  UPDATE_EXECUTION_TYPE = 2;
+  PROMOTE_EXECUTION_TYPE = 2;
+  DEMOTE_EXECUTION_TYPE = 3;
 }
 
 message UpdateContainerRequestProto {
@@ -77,6 +78,7 @@ message UpdateContainerRequestProto {
 message UpdateContainerErrorProto {
   optional string reason = 1;
   optional UpdateContainerRequestProto update_request = 2;
+  optional int32 current_container_version = 3;
 }
 
 message AllocateRequestProto {
@@ -108,11 +110,11 @@ message AllocateResponseProto {
   optional int32 num_cluster_nodes = 7;
   optional PreemptionMessageProto preempt = 8;
   repeated NMTokenProto nm_tokens = 9;
-  repeated UpdatedContainerProto updated_containers = 10;
   optional hadoop.common.TokenProto am_rm_token = 12;
   optional PriorityProto application_priority = 13;
   optional string collector_addr = 14;
   repeated UpdateContainerErrorProto update_errors = 15;
+  repeated UpdatedContainerProto updated_containers = 16;
 }
 
 enum SchedulerResourceTypes {
@@ -156,6 +158,7 @@ message FailApplicationAttemptResponseProto {
 
 message KillApplicationRequestProto {
   optional ApplicationIdProto application_id = 1;
+  optional string diagnostics = 2;
 }
 
 message KillApplicationResponseProto {
@@ -231,7 +234,7 @@ message GetNodesToLabelsRequestProto {
 }
 
 message GetNodesToLabelsResponseProto {
-  repeated NodeIdToLabelsInfoProto nodeToLabels = 1;
+  repeated NodeIdToLabelsProto nodeToLabels = 1;
 }
 
 message GetLabelsToNodesRequestProto {
@@ -246,7 +249,8 @@ message GetClusterNodeLabelsRequestProto {
 }
 
 message GetClusterNodeLabelsResponseProto {
-  repeated NodeLabelProto nodeLabels = 1;
+  repeated string deprecatedNodeLabels = 1;
+  repeated NodeLabelProto nodeLabels = 2;
 }
 
 message UpdateApplicationPriorityRequestProto {
@@ -264,6 +268,15 @@ message SignalContainerRequestProto {
 }
 
 message SignalContainerResponseProto {
+}
+
+message UpdateApplicationTimeoutsRequestProto {
+    required ApplicationIdProto applicationId = 1;
+    repeated ApplicationUpdateTimeoutMapProto application_timeouts = 2;
+}
+
+message UpdateApplicationTimeoutsResponseProto {
+    repeated ApplicationUpdateTimeoutMapProto application_timeouts = 1;
 }
 
 //////////////////////////////////////////////////////
@@ -292,6 +305,24 @@ message ResourceLocalizationRequestProto {
 }
 
 message ResourceLocalizationResponseProto {
+}
+
+message ReInitializeContainerRequestProto {
+  optional ContainerIdProto container_id = 1;
+  optional ContainerLaunchContextProto container_launch_context = 2;
+  optional bool auto_commit = 3 [default = true];
+}
+
+message ReInitializeContainerResponseProto {
+}
+
+message RestartContainerResponseProto {
+}
+
+message RollbackResponseProto {
+}
+
+message CommitResponseProto {
 }
 
 //// bulk API records

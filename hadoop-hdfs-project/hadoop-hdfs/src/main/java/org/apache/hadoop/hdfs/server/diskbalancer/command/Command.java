@@ -18,6 +18,8 @@
 
 package org.apache.hadoop.hdfs.server.diskbalancer.command;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.ObjectReader;
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Preconditions;
 import com.google.common.collect.Lists;
@@ -37,21 +39,22 @@ import org.apache.hadoop.hdfs.DFSConfigKeys;
 import org.apache.hadoop.hdfs.DFSUtilClient;
 import org.apache.hadoop.hdfs.protocol.ClientDatanodeProtocol;
 import org.apache.hadoop.hdfs.server.diskbalancer.DiskBalancerConstants;
+import org.apache.hadoop.hdfs.server.diskbalancer.DiskBalancerException;
 import org.apache.hadoop.hdfs.server.diskbalancer.connectors.ClusterConnector;
 import org.apache.hadoop.hdfs.server.diskbalancer.connectors.ConnectorFactory;
 import org.apache.hadoop.hdfs.server.diskbalancer.datamodel.DiskBalancerCluster;
 import org.apache.hadoop.hdfs.server.diskbalancer.datamodel.DiskBalancerDataNode;
 import org.apache.hadoop.hdfs.server.diskbalancer.datamodel.DiskBalancerVolume;
 import org.apache.hadoop.hdfs.server.diskbalancer.datamodel.DiskBalancerVolumeSet;
-import org.apache.hadoop.hdfs.tools.DiskBalancer;
+import org.apache.hadoop.hdfs.tools.DiskBalancerCLI;
 import org.apache.hadoop.net.NetUtils;
 import org.apache.hadoop.security.UserGroupInformation;
-import org.codehaus.jackson.map.ObjectMapper;
-import org.codehaus.jackson.map.ObjectReader;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.io.Closeable;
 import java.io.IOException;
+import java.io.PrintStream;
 import java.net.InetSocketAddress;
 import java.net.URI;
 import java.net.URL;
@@ -72,15 +75,16 @@ import java.util.TreeSet;
 /**
  * Common interface for command handling.
  */
-public abstract class Command extends Configured {
+public abstract class Command extends Configured implements Closeable {
   private static final ObjectReader READER =
-      new ObjectMapper().reader(HashMap.class);
+      new ObjectMapper().readerFor(HashMap.class);
   static final Logger LOG = LoggerFactory.getLogger(Command.class);
   private Map<String, String> validArgs = new HashMap<>();
   private URI clusterURI;
   private FileSystem fs = null;
   private DiskBalancerCluster cluster = null;
   private int topNodes;
+  private PrintStream ps;
 
   private static final Path DEFAULT_LOG_DIR = new Path("/system/diskbalancer");
 
@@ -90,9 +94,41 @@ public abstract class Command extends Configured {
    * Constructs a command.
    */
   public Command(Configuration conf) {
+    this(conf, System.out);
+  }
+
+  /**
+   * Constructs a command.
+   */
+  public Command(Configuration conf, final PrintStream ps) {
     super(conf);
     // These arguments are valid for all commands.
     topNodes = 0;
+    this.ps = ps;
+  }
+
+  /**
+   * Cleans any resources held by this command.
+   * <p>
+   * The main goal is to delete id file created in
+   * {@link org.apache.hadoop.hdfs.server.balancer
+   * .NameNodeConnector#checkAndMarkRunning}
+   * , otherwise, it's not allowed to run multiple commands in a row.
+   * </p>
+   */
+  @Override
+  public void close() throws IOException {
+    if (fs != null) {
+      fs.close();
+    }
+  }
+
+  /**
+   * Gets printing stream.
+   * @return print stream
+   */
+  PrintStream getPrintStream() {
+    return ps;
   }
 
   /**
@@ -256,6 +292,7 @@ public abstract class Command extends Configured {
       throws IOException {
     Set<String> nodeNames = null;
     List<DiskBalancerDataNode> nodeList = Lists.newArrayList();
+    List<String> invalidNodeList = Lists.newArrayList();
 
     if ((listArg == null) || listArg.isEmpty()) {
       return nodeList;
@@ -269,8 +306,20 @@ public abstract class Command extends Configured {
 
         if (node != null) {
           nodeList.add(node);
+        } else {
+          invalidNodeList.add(name);
         }
       }
+    }
+
+    if (!invalidNodeList.isEmpty()) {
+      String invalidNodes = StringUtils.join(invalidNodeList.toArray(), ",");
+      String warnMsg = String.format(
+          "The node(s) '%s' not found. "
+          + "Please make sure that '%s' exists in the cluster.",
+          invalidNodes, invalidNodes);
+      throw new DiskBalancerException(warnMsg,
+          DiskBalancerException.Result.INVALID_NODE);
     }
 
     return nodeList;
@@ -409,7 +458,8 @@ public abstract class Command extends Configured {
    *
    * @return Cluster.
    */
-  protected DiskBalancerCluster getCluster() {
+  @VisibleForTesting
+  DiskBalancerCluster getCluster() {
     return cluster;
   }
 
@@ -418,7 +468,7 @@ public abstract class Command extends Configured {
    * @return default top number of nodes.
    */
   protected int getDefaultTop() {
-    return DiskBalancer.DEFAULT_TOP;
+    return DiskBalancerCLI.DEFAULT_TOP;
   }
 
   /**
@@ -437,7 +487,7 @@ public abstract class Command extends Configured {
   protected int parseTopNodes(final CommandLine cmd, final StrBuilder result) {
     String outputLine = "";
     int nodes = 0;
-    final String topVal = cmd.getOptionValue(DiskBalancer.TOP);
+    final String topVal = cmd.getOptionValue(DiskBalancerCLI.TOP);
     if (StringUtils.isBlank(topVal)) {
       outputLine = String.format(
           "No top limit specified, using default top value %d.",

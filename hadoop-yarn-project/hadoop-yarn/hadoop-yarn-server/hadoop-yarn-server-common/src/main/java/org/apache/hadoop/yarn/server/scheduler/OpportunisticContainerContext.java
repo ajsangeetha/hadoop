@@ -19,18 +19,17 @@
 package org.apache.hadoop.yarn.server.scheduler;
 
 import org.apache.hadoop.yarn.api.records.Container;
-import org.apache.hadoop.yarn.api.records.ContainerId;
-import org.apache.hadoop.yarn.api.records.NMToken;
-import org.apache.hadoop.yarn.api.records.NodeId;
-import org.apache.hadoop.yarn.api.records.Priority;
 import org.apache.hadoop.yarn.api.records.Resource;
 import org.apache.hadoop.yarn.api.records.ResourceRequest;
+import org.apache.hadoop.yarn.server.api.protocolrecords.RemoteNode;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
+import java.util.LinkedList;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -48,33 +47,24 @@ public class OpportunisticContainerContext {
   private static final Logger LOG = LoggerFactory
       .getLogger(OpportunisticContainerContext.class);
 
-  // Currently just used to keep track of allocated containers.
-  // Can be used for reporting stats later.
-  private Set<ContainerId> containersAllocated = new HashSet<>();
   private AllocationParams appParams =
       new AllocationParams();
   private ContainerIdGenerator containerIdGenerator =
       new ContainerIdGenerator();
 
-  private Map<String, NodeId> nodeMap = new LinkedHashMap<>();
+  private volatile List<RemoteNode> nodeList = new LinkedList<>();
+  private final Map<String, RemoteNode> nodeMap = new LinkedHashMap<>();
 
-  // Mapping of NodeId to NodeTokens. Populated either from RM response or
-  // generated locally if required.
-  private Map<NodeId, NMToken> nodeTokens = new HashMap<>();
   private final Set<String> blacklist = new HashSet<>();
 
   // This maintains a map of outstanding OPPORTUNISTIC Reqs. Key-ed by Priority,
-  // Resource Name (Host/rack/any) and capability. This mapping is required
+  // Resource Name (host/rack/any) and capability. This mapping is required
   // to match a received Container to an outstanding OPPORTUNISTIC
   // ResourceRequest (ask).
-  private final TreeMap<Priority, Map<Resource, ResourceRequest>>
+  private final TreeMap<SchedulerRequestKey, Map<Resource, ResourceRequest>>
       outstandingOpReqs = new TreeMap<>();
 
-  public Set<ContainerId> getContainersAllocated() {
-    return containersAllocated;
-  }
-
-  public OpportunisticContainerAllocator.AllocationParams getAppParams() {
+  public AllocationParams getAppParams() {
     return appParams;
   }
 
@@ -87,19 +77,37 @@ public class OpportunisticContainerContext {
     this.containerIdGenerator = containerIdGenerator;
   }
 
-  public Map<String, NodeId> getNodeMap() {
-    return nodeMap;
+  public Map<String, RemoteNode> getNodeMap() {
+    return Collections.unmodifiableMap(nodeMap);
   }
 
-  public Map<NodeId, NMToken> getNodeTokens() {
-    return nodeTokens;
+  public synchronized void updateNodeList(List<RemoteNode> newNodeList) {
+    // This is an optimization for centralized placement. The
+    // OppContainerAllocatorAMService has a cached list of nodes which it sets
+    // here. The nodeMap needs to be updated only if the backing node list is
+    // modified.
+    if (newNodeList != nodeList) {
+      nodeList = newNodeList;
+      nodeMap.clear();
+      for (RemoteNode n : nodeList) {
+        nodeMap.put(n.getNodeId().getHost(), n);
+      }
+    }
+  }
+
+  public void updateAllocationParams(Resource minResource, Resource maxResource,
+      Resource incrResource, int containerTokenExpiryInterval) {
+    appParams.setMinResource(minResource);
+    appParams.setMaxResource(maxResource);
+    appParams.setIncrementResource(incrResource);
+    appParams.setContainerTokenExpiryInterval(containerTokenExpiryInterval);
   }
 
   public Set<String> getBlacklist() {
     return blacklist;
   }
 
-  public TreeMap<Priority, Map<Resource, ResourceRequest>>
+  public TreeMap<SchedulerRequestKey, Map<Resource, ResourceRequest>>
       getOutstandingOpReqs() {
     return outstandingOpReqs;
   }
@@ -115,7 +123,7 @@ public class OpportunisticContainerContext {
    */
   public void addToOutstandingReqs(List<ResourceRequest> resourceAsks) {
     for (ResourceRequest request : resourceAsks) {
-      Priority priority = request.getPriority();
+      SchedulerRequestKey schedulerKey = SchedulerRequestKey.create(request);
 
       // TODO: Extend for Node/Rack locality. We only handle ANY requests now
       if (!ResourceRequest.isAnyLocation(request.getResourceName())) {
@@ -127,10 +135,10 @@ public class OpportunisticContainerContext {
       }
 
       Map<Resource, ResourceRequest> reqMap =
-          outstandingOpReqs.get(priority);
+          outstandingOpReqs.get(schedulerKey);
       if (reqMap == null) {
         reqMap = new HashMap<>();
-        outstandingOpReqs.put(priority, reqMap);
+        outstandingOpReqs.put(schedulerKey, reqMap);
       }
 
       ResourceRequest resourceRequest = reqMap.get(request.getCapability());
@@ -142,7 +150,9 @@ public class OpportunisticContainerContext {
             resourceRequest.getNumContainers() + request.getNumContainers());
       }
       if (ResourceRequest.isAnyLocation(request.getResourceName())) {
-        LOG.info("# of outstandingOpReqs in ANY (at priority = " + priority
+        LOG.info("# of outstandingOpReqs in ANY (at "
+            + "priority = " + schedulerKey.getPriority()
+            + ", allocationReqId = " + schedulerKey.getAllocationRequestId()
             + ", with capability = " + request.getCapability() + " ) : "
             + resourceRequest.getNumContainers());
       }
@@ -158,9 +168,10 @@ public class OpportunisticContainerContext {
   public void matchAllocationToOutstandingRequest(Resource capability,
       List<Container> allocatedContainers) {
     for (Container c : allocatedContainers) {
-      containersAllocated.add(c.getId());
+      SchedulerRequestKey schedulerKey =
+          SchedulerRequestKey.extractFrom(c);
       Map<Resource, ResourceRequest> asks =
-          outstandingOpReqs.get(c.getPriority());
+          outstandingOpReqs.get(schedulerKey);
 
       if (asks == null) {
         continue;

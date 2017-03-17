@@ -20,8 +20,8 @@ package org.apache.hadoop.yarn.server.nodemanager.containermanager.application;
 
 import java.io.IOException;
 import java.util.EnumSet;
-import java.util.HashMap;
 import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
 import java.util.concurrent.locks.ReentrantReadWriteLock.ReadLock;
 import java.util.concurrent.locks.ReentrantReadWriteLock.WriteLock;
@@ -89,7 +89,7 @@ public class ApplicationImpl implements Application {
   private LogAggregationContext logAggregationContext;
 
   Map<ContainerId, Container> containers =
-      new HashMap<ContainerId, Container>();
+      new ConcurrentHashMap<>();
 
   /**
    * The timestamp when the log aggregation has started for this application.
@@ -591,8 +591,10 @@ public class ApplicationImpl implements Application {
 
     try {
       ApplicationId applicationID = event.getApplicationID();
-      LOG.debug("Processing " + applicationID + " of type " + event.getType());
-
+      if (LOG.isDebugEnabled()) {
+        LOG.debug(
+            "Processing " + applicationID + " of type " + event.getType());
+      }
       ApplicationState oldState = stateMachine.getCurrentState();
       ApplicationState newState = null;
       try {
@@ -601,7 +603,7 @@ public class ApplicationImpl implements Application {
       } catch (InvalidStateTransitionException e) {
         LOG.warn("Can't handle this event at current state", e);
       }
-      if (oldState != newState) {
+      if (newState != null && oldState != newState) {
         LOG.info("Application " + applicationID + " transitioned from "
             + oldState + " to " + newState);
       }

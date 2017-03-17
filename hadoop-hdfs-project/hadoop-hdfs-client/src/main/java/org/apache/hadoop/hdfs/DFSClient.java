@@ -90,6 +90,7 @@ import org.apache.hadoop.fs.XAttrSetFlag;
 import org.apache.hadoop.fs.permission.AclEntry;
 import org.apache.hadoop.fs.permission.AclStatus;
 import org.apache.hadoop.fs.permission.FsAction;
+import org.apache.hadoop.fs.permission.FsCreateModes;
 import org.apache.hadoop.fs.permission.FsPermission;
 import org.apache.hadoop.hdfs.NameNodeProxiesClient.ProxyAndInfo;
 import org.apache.hadoop.hdfs.client.HdfsClientConfigKeys;
@@ -1160,14 +1161,14 @@ public class DFSClient implements java.io.Closeable, RemotePeerFactory,
     if (permission == null) {
       permission = FsPermission.getFileDefault();
     }
-    return permission.applyUMask(dfsClientConf.getUMask());
+    return FsCreateModes.applyUMask(permission, dfsClientConf.getUMask());
   }
 
   private FsPermission applyUMaskDir(FsPermission permission) {
     if (permission == null) {
       permission = FsPermission.getDirDefault();
     }
-    return permission.applyUMask(dfsClientConf.getUMask());
+    return FsCreateModes.applyUMask(permission, dfsClientConf.getUMask());
   }
 
   /**
@@ -1709,6 +1710,11 @@ public class DFSClient implements java.io.Closeable, RemotePeerFactory,
     }
   }
 
+  @VisibleForTesting
+  public DataEncryptionKey getEncryptionKey() {
+    return encryptionKey;
+  }
+
   /**
    * Get the checksum of the whole file or a range of the file. Note that the
    * range always starts from the beginning of the file. The file can be
@@ -1725,10 +1731,14 @@ public class DFSClient implements java.io.Closeable, RemotePeerFactory,
     checkOpen();
     Preconditions.checkArgument(length >= 0);
 
-    LocatedBlocks blockLocations = getBlockLocations(src, length);
+    LocatedBlocks blockLocations = null;
+    FileChecksumHelper.FileChecksumComputer maker = null;
+    ErasureCodingPolicy ecPolicy = null;
+    if (length > 0) {
+      blockLocations = getBlockLocations(src, length);
+      ecPolicy = blockLocations.getErasureCodingPolicy();
+    }
 
-    FileChecksumHelper.FileChecksumComputer maker;
-    ErasureCodingPolicy ecPolicy = blockLocations.getErasureCodingPolicy();
     maker = ecPolicy != null ?
         new FileChecksumHelper.StripedFileNonStripedChecksumComputer(src,
             length, blockLocations, namenode, this, ecPolicy) :
@@ -2227,7 +2237,7 @@ public class DFSClient implements java.io.Closeable, RemotePeerFactory,
 
   /**
    * Requests the namenode to tell all datanodes to use a new, non-persistent
-   * bandwidth value for dfs.balance.bandwidthPerSec.
+   * bandwidth value for dfs.datanode.balance.bandwidthPerSec.
    * See {@link ClientProtocol#setBalancerBandwidth(long)}
    * for more details.
    *
@@ -2593,8 +2603,8 @@ public class DFSClient implements java.io.Closeable, RemotePeerFactory,
     try (TraceScope ignored = newPathTraceScope("getEZForPath", src)) {
       return namenode.getEZForPath(src);
     } catch (RemoteException re) {
-      throw re.unwrapRemoteException(FileNotFoundException.class,
-          AccessControlException.class, UnresolvedPathException.class);
+      throw re.unwrapRemoteException(AccessControlException.class,
+          UnresolvedPathException.class);
     }
   }
 
@@ -2605,16 +2615,30 @@ public class DFSClient implements java.io.Closeable, RemotePeerFactory,
   }
 
 
-  public void setErasureCodingPolicy(String src, ErasureCodingPolicy ecPolicy)
+  public void setErasureCodingPolicy(String src, String ecPolicyName)
       throws IOException {
     checkOpen();
     try (TraceScope ignored =
              newPathTraceScope("setErasureCodingPolicy", src)) {
-      namenode.setErasureCodingPolicy(src, ecPolicy);
+      namenode.setErasureCodingPolicy(src, ecPolicyName);
     } catch (RemoteException re) {
       throw re.unwrapRemoteException(AccessControlException.class,
           SafeModeException.class,
-          UnresolvedPathException.class);
+          UnresolvedPathException.class,
+          FileNotFoundException.class);
+    }
+  }
+
+  public void unsetErasureCodingPolicy(String src) throws IOException {
+    checkOpen();
+    try (TraceScope ignored =
+             newPathTraceScope("unsetErasureCodingPolicy", src)) {
+      namenode.unsetErasureCodingPolicy(src);
+    } catch (RemoteException re) {
+      throw re.unwrapRemoteException(AccessControlException.class,
+          SafeModeException.class,
+          UnresolvedPathException.class,
+          FileNotFoundException.class);
     }
   }
 
@@ -2794,37 +2818,17 @@ public class DFSClient implements java.io.Closeable, RemotePeerFactory,
   /**
    * Create thread pool for parallel reading in striped layout,
    * STRIPED_READ_THREAD_POOL, if it does not already exist.
-   * @param num Number of threads for striped reads thread pool.
+   * @param numThreads Number of threads for striped reads thread pool.
    */
-  private void initThreadsNumForStripedReads(int num) {
-    assert num > 0;
+  private void initThreadsNumForStripedReads(int numThreads) {
+    assert numThreads > 0;
     if (STRIPED_READ_THREAD_POOL != null) {
       return;
     }
     synchronized (DFSClient.class) {
       if (STRIPED_READ_THREAD_POOL == null) {
-        STRIPED_READ_THREAD_POOL = new ThreadPoolExecutor(1, num, 60,
-            TimeUnit.SECONDS, new SynchronousQueue<Runnable>(),
-            new Daemon.DaemonFactory() {
-              private final AtomicInteger threadIndex = new AtomicInteger(0);
-
-              @Override
-              public Thread newThread(Runnable r) {
-                Thread t = super.newThread(r);
-                t.setName("stripedRead-" + threadIndex.getAndIncrement());
-                return t;
-              }
-            },
-            new ThreadPoolExecutor.CallerRunsPolicy() {
-              @Override
-              public void rejectedExecution(Runnable runnable,
-                  ThreadPoolExecutor e) {
-                LOG.info("Execution for striped reading rejected, "
-                    + "Executing in current thread");
-                // will run in the current thread
-                super.rejectedExecution(runnable, e);
-              }
-            });
+        STRIPED_READ_THREAD_POOL = DFSUtilClient.getThreadPoolExecutor(1,
+            numThreads, 60, "StripedRead-", true);
         STRIPED_READ_THREAD_POOL.allowCoreThreadTimeOut(true);
       }
     }

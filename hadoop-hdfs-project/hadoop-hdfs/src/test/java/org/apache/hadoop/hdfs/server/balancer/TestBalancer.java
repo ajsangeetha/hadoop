@@ -44,6 +44,9 @@ import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_NAMENODE_KEYTAB_FILE_KEY;
 import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_NAMENODE_LAZY_PERSIST_FILE_SCRUB_INTERVAL_SEC;
 import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_WEB_AUTHENTICATION_KERBEROS_PRINCIPAL_KEY;
 import static org.apache.hadoop.test.PlatformAssumptions.assumeNotWindows;
+
+import org.apache.hadoop.hdfs.protocol.ErasureCodingPolicy;
+import org.junit.AfterClass;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
@@ -138,6 +141,8 @@ public class TestBalancer {
   final static private String username = "balancer";
   private static String principal;
   private static File baseDir;
+  private static String keystoresDir;
+  private static String sslConfDir;
   private static MiniKdc kdc;
   private static File keytabFile;
   private MiniDFSCluster cluster;
@@ -173,11 +178,13 @@ public class TestBalancer {
     conf.setInt(DFSConfigKeys.DFS_BYTES_PER_CHECKSUM_KEY, DEFAULT_BLOCK_SIZE);
     conf.setLong(DFSConfigKeys.DFS_HEARTBEAT_INTERVAL_KEY, 1L);
     conf.setInt(DFSConfigKeys.DFS_NAMENODE_HEARTBEAT_RECHECK_INTERVAL_KEY, 500);
-    conf.setLong(DFSConfigKeys.DFS_NAMENODE_REPLICATION_INTERVAL_KEY, 1L);
+    conf.setLong(DFSConfigKeys.DFS_NAMENODE_REDUNDANCY_INTERVAL_SECONDS_KEY,
+        1L);
     SimulatedFSDataset.setFactory(conf);
 
     conf.setLong(DFSConfigKeys.DFS_BALANCER_MOVEDWINWIDTH_KEY, 2000L);
     conf.setLong(DFSConfigKeys.DFS_BALANCER_GETBLOCKS_MIN_BLOCK_SIZE_KEY, 1L);
+    conf.setInt(DFSConfigKeys.DFS_BALANCER_MAX_NO_MOVE_INTERVAL_KEY, 5*1000);
   }
 
   static void initConfWithRamDisk(Configuration conf,
@@ -188,24 +195,29 @@ public class TestBalancer {
     conf.setLong(DFS_HEARTBEAT_INTERVAL_KEY, 1);
     conf.setInt(DFS_NAMENODE_HEARTBEAT_RECHECK_INTERVAL_KEY, 500);
     conf.setInt(DFS_DATANODE_LAZY_WRITER_INTERVAL_SEC, 1);
+    conf.setInt(DFSConfigKeys.DFS_BALANCER_MAX_NO_MOVE_INTERVAL_KEY, 5*1000);
     LazyPersistTestCase.initCacheManipulator();
 
     conf.setLong(DFSConfigKeys.DFS_BALANCER_GETBLOCKS_MIN_BLOCK_SIZE_KEY, 1L);
   }
 
-  int dataBlocks = StripedFileTestUtil.NUM_DATA_BLOCKS;
-  int parityBlocks = StripedFileTestUtil.NUM_PARITY_BLOCKS;
-  int groupSize = dataBlocks + parityBlocks;
-  private final static int cellSize = StripedFileTestUtil.BLOCK_STRIPED_CELL_SIZE;
-  private final static int stripesPerBlock = 4;
-  static int DEFAULT_STRIPE_BLOCK_SIZE = cellSize * stripesPerBlock;
+  private final ErasureCodingPolicy ecPolicy =
+      StripedFileTestUtil.getDefaultECPolicy();
+  private final int dataBlocks = ecPolicy.getNumDataUnits();
+  private final int parityBlocks = ecPolicy.getNumParityUnits();
+  private final int groupSize = dataBlocks + parityBlocks;
+  private final int cellSize = ecPolicy.getCellSize();
+  private final int stripesPerBlock = 4;
+  private final int defaultBlockSize = cellSize * stripesPerBlock;
 
-  static void initConfWithStripe(Configuration conf) {
-    conf.setLong(DFSConfigKeys.DFS_BLOCK_SIZE_KEY, DEFAULT_STRIPE_BLOCK_SIZE);
-    conf.setBoolean(DFSConfigKeys.DFS_NAMENODE_REPLICATION_CONSIDERLOAD_KEY, false);
+  void initConfWithStripe(Configuration conf) {
+    conf.setLong(DFSConfigKeys.DFS_BLOCK_SIZE_KEY, defaultBlockSize);
+    conf.setBoolean(DFSConfigKeys.DFS_NAMENODE_REDUNDANCY_CONSIDERLOAD_KEY,
+        false);
     conf.setLong(DFSConfigKeys.DFS_HEARTBEAT_INTERVAL_KEY, 1L);
     SimulatedFSDataset.setFactory(conf);
-    conf.setLong(DFSConfigKeys.DFS_NAMENODE_REPLICATION_INTERVAL_KEY, 1L);
+    conf.setLong(DFSConfigKeys.DFS_NAMENODE_REDUNDANCY_INTERVAL_SECONDS_KEY,
+        1L);
     conf.setLong(DFSConfigKeys.DFS_BALANCER_MOVEDWINWIDTH_KEY, 2000L);
     conf.setLong(DFSConfigKeys.DFS_BALANCER_GETBLOCKS_MIN_BLOCK_SIZE_KEY, 1L);
   }
@@ -252,8 +264,8 @@ public class TestBalancer {
     conf.set(DFS_BALANCER_KEYTAB_FILE_KEY, keytab);
     conf.set(DFS_BALANCER_KERBEROS_PRINCIPAL_KEY, principal);
 
-    String keystoresDir = baseDir.getAbsolutePath();
-    String sslConfDir = KeyStoreTestUtil.getClasspathDir(TestBalancer.class);
+    keystoresDir = baseDir.getAbsolutePath();
+    sslConfDir = KeyStoreTestUtil.getClasspathDir(TestBalancer.class);
     KeyStoreTestUtil.setupSSLConfig(keystoresDir, sslConfDir, conf, false);
 
     conf.set(DFS_CLIENT_HTTPS_KEYSTORE_RESOURCE_KEY,
@@ -261,6 +273,15 @@ public class TestBalancer {
     conf.set(DFS_SERVER_HTTPS_KEYSTORE_RESOURCE_KEY,
         KeyStoreTestUtil.getServerSSLConfigFileName());
     initConf(conf);
+  }
+
+  @AfterClass
+  public static void destroy() throws Exception {
+    if (kdc != null) {
+      kdc.stop();
+      FileUtil.fullyDelete(baseDir);
+      KeyStoreTestUtil.cleanupSSLConfig(keystoresDir, sslConfDir);
+    }
   }
 
   /* create a file with a length of <code>fileLen</code> */
@@ -903,11 +924,13 @@ public class TestBalancer {
   private static int runBalancer(Collection<URI> namenodes,
       final BalancerParameters p,
       Configuration conf) throws IOException, InterruptedException {
-    final long sleeptime =
-        conf.getLong(DFSConfigKeys.DFS_HEARTBEAT_INTERVAL_KEY,
-            DFSConfigKeys.DFS_HEARTBEAT_INTERVAL_DEFAULT) * 2000 +
-        conf.getLong(DFSConfigKeys.DFS_NAMENODE_REPLICATION_INTERVAL_KEY,
-            DFSConfigKeys.DFS_NAMENODE_REPLICATION_INTERVAL_DEFAULT) * 1000;
+    final long sleeptime = conf.getLong(
+        DFSConfigKeys.DFS_HEARTBEAT_INTERVAL_KEY,
+        DFSConfigKeys.DFS_HEARTBEAT_INTERVAL_DEFAULT) * 2000
+        + conf.getLong(
+            DFSConfigKeys.DFS_NAMENODE_REDUNDANCY_INTERVAL_SECONDS_KEY,
+            DFSConfigKeys.DFS_NAMENODE_REDUNDANCY_INTERVAL_SECONDS_DEFAULT)
+            * 1000;
     LOG.info("namenodes  = " + namenodes);
     LOG.info("parameters = " + p);
     LOG.info("Print stack trace", new Throwable());
@@ -1282,6 +1305,14 @@ public class TestBalancer {
     } catch (IllegalArgumentException e) {
 
     }
+
+    parameters = new String[] {"-source"};
+    try {
+      Balancer.Cli.parse(parameters);
+      fail(reason + " for -source parameter");
+    } catch (IllegalArgumentException ignored) {
+      // expected
+    }
   }
 
   @Test
@@ -1576,7 +1607,7 @@ public class TestBalancer {
     Configuration conf = new HdfsConfiguration();
     conf.setLong(DFS_HEARTBEAT_INTERVAL_KEY, 1);
     conf.setInt(DFS_NAMENODE_HEARTBEAT_RECHECK_INTERVAL_KEY, 500);
-    conf.setLong(DFSConfigKeys.DFS_NAMENODE_REPLICATION_INTERVAL_KEY, 1);
+    conf.setLong(DFSConfigKeys.DFS_NAMENODE_REDUNDANCY_INTERVAL_SECONDS_KEY, 1);
 
     conf.setLong(DFSConfigKeys.DFS_BALANCER_GETBLOCKS_MIN_BLOCK_SIZE_KEY, 1L);
 
@@ -1643,7 +1674,8 @@ public class TestBalancer {
     int blockSize = 5 * 1024 * 1024 ;
     conf.setLong(DFSConfigKeys.DFS_BLOCK_SIZE_KEY, blockSize);
     conf.setLong(DFSConfigKeys.DFS_HEARTBEAT_INTERVAL_KEY, 1L);
-    conf.setLong(DFSConfigKeys.DFS_NAMENODE_REPLICATION_INTERVAL_KEY, 1L);
+    conf.setLong(DFSConfigKeys.DFS_NAMENODE_REDUNDANCY_INTERVAL_SECONDS_KEY,
+        1L);
 
     conf.setLong(DFSConfigKeys.DFS_BALANCER_GETBLOCKS_MIN_BLOCK_SIZE_KEY, 1L);
 
@@ -1800,11 +1832,12 @@ public class TestBalancer {
     final Collection<URI> namenodes = DFSUtil.getInternalNsRpcUris(conf);
 
     { // run Balancer with min-block-size=50
-      BalancerParameters.Builder b =
-          new BalancerParameters.Builder();
-      b.setBalancingPolicy(BalancingPolicy.Node.INSTANCE);
-      b.setThreshold(1);
-      final BalancerParameters p = b.build();
+      final BalancerParameters p = Balancer.Cli.parse(new String[] {
+          "-policy", BalancingPolicy.Node.INSTANCE.getName(),
+          "-threshold", "1"
+      });
+      assertEquals(p.getBalancingPolicy(), BalancingPolicy.Node.INSTANCE);
+      assertEquals(p.getThreshold(), 1.0, 0.001);
 
       conf.setLong(DFSConfigKeys.DFS_BALANCER_GETBLOCKS_MIN_BLOCK_SIZE_KEY, 50);
       final int r = Balancer.run(namenodes, p, conf);
@@ -1819,12 +1852,14 @@ public class TestBalancer {
       for(int i = capacities.length; i < datanodes.size(); i++) {
         sourceNodes.add(datanodes.get(i).getDisplayName());
       }
-      BalancerParameters.Builder b =
-          new BalancerParameters.Builder();
-      b.setBalancingPolicy(BalancingPolicy.Node.INSTANCE);
-      b.setThreshold(1);
-      b.setSourceNodes(sourceNodes);
-      final BalancerParameters p = b.build();
+      final BalancerParameters p = Balancer.Cli.parse(new String[] {
+          "-policy", BalancingPolicy.Node.INSTANCE.getName(),
+          "-threshold", "1",
+          "-source", StringUtils.join(sourceNodes, ',')
+      });
+      assertEquals(p.getBalancingPolicy(), BalancingPolicy.Node.INSTANCE);
+      assertEquals(p.getThreshold(), 1.0, 0.001);
+      assertEquals(p.getSourceNodes(), sourceNodes);
 
       conf.setLong(DFSConfigKeys.DFS_BALANCER_GETBLOCKS_MIN_BLOCK_SIZE_KEY, 50);
       final int r = Balancer.run(namenodes, p, conf);
@@ -1835,12 +1870,14 @@ public class TestBalancer {
       final Set<String> sourceNodes = new HashSet<>();
       final List<DataNode> datanodes = cluster.getDataNodes();
       sourceNodes.add(datanodes.get(0).getDisplayName());
-      BalancerParameters.Builder b =
-          new BalancerParameters.Builder();
-      b.setBalancingPolicy(BalancingPolicy.Node.INSTANCE);
-      b.setThreshold(1);
-      b.setSourceNodes(sourceNodes);
-      final BalancerParameters p = b.build();
+      final BalancerParameters p = Balancer.Cli.parse(new String[] {
+          "-policy", BalancingPolicy.Node.INSTANCE.getName(),
+          "-threshold", "1",
+          "-source", StringUtils.join(sourceNodes, ',')
+      });
+      assertEquals(p.getBalancingPolicy(), BalancingPolicy.Node.INSTANCE);
+      assertEquals(p.getThreshold(), 1.0, 0.001);
+      assertEquals(p.getSourceNodes(), sourceNodes);
 
       conf.setLong(DFSConfigKeys.DFS_BALANCER_GETBLOCKS_MIN_BLOCK_SIZE_KEY, 1);
       final int r = Balancer.run(namenodes, p, conf);
@@ -1853,12 +1890,14 @@ public class TestBalancer {
       for(int i = 0; i < capacities.length; i++) {
         sourceNodes.add(datanodes.get(i).getDisplayName());
       }
-      BalancerParameters.Builder b =
-          new BalancerParameters.Builder();
-      b.setBalancingPolicy(BalancingPolicy.Node.INSTANCE);
-      b.setThreshold(1);
-      b.setSourceNodes(sourceNodes);
-      final BalancerParameters p = b.build();
+      final BalancerParameters p = Balancer.Cli.parse(new String[] {
+          "-policy", BalancingPolicy.Node.INSTANCE.getName(),
+          "-threshold", "1",
+          "-source", StringUtils.join(sourceNodes, ',')
+      });
+      assertEquals(p.getBalancingPolicy(), BalancingPolicy.Node.INSTANCE);
+      assertEquals(p.getThreshold(), 1.0, 0.001);
+      assertEquals(p.getSourceNodes(), sourceNodes);
 
       conf.setLong(DFSConfigKeys.DFS_BALANCER_GETBLOCKS_MIN_BLOCK_SIZE_KEY, 1);
       final int r = Balancer.run(namenodes, p, conf);
@@ -1879,9 +1918,9 @@ public class TestBalancer {
   }
 
   private void doTestBalancerWithStripedFile(Configuration conf) throws Exception {
-    int numOfDatanodes = dataBlocks + parityBlocks + 2;
+    int numOfDatanodes = dataBlocks + parityBlocks + 3;
     int numOfRacks = dataBlocks;
-    long capacity = 20 * DEFAULT_STRIPE_BLOCK_SIZE;
+    long capacity = 20 * defaultBlockSize;
     long[] capacities = new long[numOfDatanodes];
     for (int i = 0; i < capacities.length; i++) {
       capacities[i] = capacity;
@@ -1890,6 +1929,8 @@ public class TestBalancer {
     for (int i = 0; i < numOfDatanodes; i++) {
       racks[i] = "/rack" + (i % numOfRacks);
     }
+    conf.set(DFSConfigKeys.DFS_NAMENODE_EC_POLICIES_ENABLED_KEY,
+        StripedFileTestUtil.getDefaultECPolicy().getName());
     cluster = new MiniDFSCluster.Builder(conf)
         .numDataNodes(numOfDatanodes)
         .racks(racks)
@@ -1900,7 +1941,8 @@ public class TestBalancer {
       cluster.waitActive();
       client = NameNodeProxies.createProxy(conf, cluster.getFileSystem(0).getUri(),
           ClientProtocol.class).getProxy();
-      client.setErasureCodingPolicy("/", null);
+      client.setErasureCodingPolicy("/",
+          StripedFileTestUtil.getDefaultECPolicy().getName());
 
       long totalCapacity = sum(capacities);
 
@@ -1914,11 +1956,12 @@ public class TestBalancer {
       LocatedBlocks locatedBlocks = client.getBlockLocations(fileName, 0, fileLen);
       StripedFileTestUtil.verifyLocatedStripedBlocks(locatedBlocks, groupSize);
 
-      // add one datanode
+      // add datanodes in new rack
       String newRack = "/rack" + (++numOfRacks);
-      cluster.startDataNodes(conf, 1, true, null,
-          new String[]{newRack}, null, new long[]{capacity});
-      totalCapacity += capacity;
+      cluster.startDataNodes(conf, 2, true, null,
+          new String[]{newRack, newRack}, null,
+          new long[]{capacity, capacity});
+      totalCapacity += capacity*2;
       cluster.triggerHeartbeats();
 
       // run balancer and validate results

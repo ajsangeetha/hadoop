@@ -44,13 +44,13 @@ import org.apache.hadoop.conf.Configurable;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.fs.permission.FsPermission;
-import org.apache.hadoop.yarn.api.ApplicationConstants;
 import org.apache.hadoop.yarn.api.records.ContainerId;
 import org.apache.hadoop.yarn.api.records.Resource;
 import org.apache.hadoop.yarn.conf.YarnConfiguration;
 import org.apache.hadoop.yarn.server.nodemanager.containermanager.container.Container;
 import org.apache.hadoop.yarn.server.nodemanager.containermanager.container.ContainerDiagnosticsUpdateEvent;
 import org.apache.hadoop.yarn.server.nodemanager.containermanager.launcher.ContainerLaunch;
+import org.apache.hadoop.yarn.server.nodemanager.executor.ContainerPrepareContext;
 import org.apache.hadoop.yarn.server.nodemanager.util.NodeManagerHardwareUtils;
 import org.apache.hadoop.yarn.server.nodemanager.executor.ContainerLivenessContext;
 import org.apache.hadoop.yarn.server.nodemanager.executor.ContainerReacquisitionContext;
@@ -149,6 +149,14 @@ public abstract class ContainerExecutor implements Configurable {
   public abstract void startLocalizer(LocalizerStartContext ctx)
     throws IOException, InterruptedException;
 
+  /**
+   * Prepare the container prior to the launch environment being written.
+   * @param ctx Encapsulates information necessary for launching containers.
+   * @throws IOException if errors occur during container preparation
+   */
+  public void prepareContainer(ContainerPrepareContext ctx) throws
+      IOException{
+  }
 
   /**
    * Launch the container on the node. This is a blocking call and returns only
@@ -180,6 +188,15 @@ public abstract class ContainerExecutor implements Configurable {
    */
   public abstract void deleteAsUser(DeletionAsUserContext ctx)
       throws IOException, InterruptedException;
+
+  /**
+   * Create a symlink file which points to the target.
+   * @param target The target for symlink
+   * @param symlink the symlink file
+   * @throws IOException Error when creating symlinks
+   */
+  public abstract void symLink(String target, String symlink)
+      throws IOException;
 
   /**
    * Check if a container is alive.
@@ -311,12 +328,11 @@ public abstract class ContainerExecutor implements Configurable {
         ContainerLaunch.ShellScriptBuilder.create();
     Set<String> whitelist = new HashSet<>();
 
-    whitelist.add(YarnConfiguration.NM_DOCKER_CONTAINER_EXECUTOR_IMAGE_NAME);
-    whitelist.add(ApplicationConstants.Environment.HADOOP_YARN_HOME.name());
-    whitelist.add(ApplicationConstants.Environment.HADOOP_COMMON_HOME.name());
-    whitelist.add(ApplicationConstants.Environment.HADOOP_HDFS_HOME.name());
-    whitelist.add(ApplicationConstants.Environment.HADOOP_CONF_DIR.name());
-    whitelist.add(ApplicationConstants.Environment.JAVA_HOME.name());
+    String[] nmWhiteList = conf.get(YarnConfiguration.NM_ENV_WHITELIST,
+        YarnConfiguration.DEFAULT_NM_ENV_WHITELIST).split(",");
+    for (String param : nmWhiteList) {
+      whitelist.add(param);
+    }
 
     if (environment != null) {
       for (Map.Entry<String, String> env : environment.entrySet()) {

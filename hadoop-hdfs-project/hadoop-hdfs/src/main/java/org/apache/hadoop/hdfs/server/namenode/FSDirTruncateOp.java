@@ -31,8 +31,10 @@ import org.apache.hadoop.hdfs.protocol.SnapshotAccessControlException;
 import org.apache.hadoop.hdfs.server.blockmanagement.BlockInfo;
 import org.apache.hadoop.hdfs.server.blockmanagement.BlockInfoContiguous;
 import org.apache.hadoop.hdfs.server.blockmanagement.BlockManager;
+import org.apache.hadoop.hdfs.protocol.BlockType;
 import org.apache.hadoop.hdfs.server.blockmanagement.BlockUnderConstructionFeature;
 import org.apache.hadoop.hdfs.server.common.HdfsServerConstants.BlockUCState;
+import org.apache.hadoop.hdfs.server.namenode.FSDirectory.DirOp;
 import org.apache.hadoop.hdfs.server.namenode.FSNamesystem.RecoverLeaseOp;
 import org.apache.hadoop.hdfs.server.namenode.INode.BlocksMapUpdateInfo;
 
@@ -77,7 +79,7 @@ final class FSDirTruncateOp {
     Block truncateBlock = null;
     fsd.writeLock();
     try {
-      iip = fsd.resolvePathForWrite(pc, srcArg);
+      iip = fsd.resolvePath(pc, srcArg, DirOp.WRITE);
       src = iip.getPath();
       if (fsd.isPermissionEnabled()) {
         fsd.checkPathAccess(pc, iip, FsAction.WRITE);
@@ -154,7 +156,7 @@ final class FSDirTruncateOp {
    * {@link FSDirTruncateOp#truncate}, this will not schedule block recovery.
    *
    * @param fsn namespace
-   * @param src path name
+   * @param iip path name
    * @param clientName client name
    * @param clientMachine client machine info
    * @param newLength the target file size
@@ -162,7 +164,8 @@ final class FSDirTruncateOp {
    * @param truncateBlock truncate block
    * @throws IOException
    */
-  static void unprotectedTruncate(final FSNamesystem fsn, final String src,
+  static void unprotectedTruncate(final FSNamesystem fsn,
+      final INodesInPath iip,
       final String clientName, final String clientMachine,
       final long newLength, final long mtime, final Block truncateBlock)
       throws UnresolvedLinkException, QuotaExceededException,
@@ -170,7 +173,6 @@ final class FSDirTruncateOp {
     assert fsn.hasWriteLock();
 
     FSDirectory fsd = fsn.getFSDirectory();
-    INodesInPath iip = fsd.getINodesInPath(src, true);
     INodeFile file = iip.getLastINode().asFile();
     BlocksMapUpdateInfo collectedBlocks = new BlocksMapUpdateInfo();
     boolean onBlockBoundary = unprotectedTruncate(fsn, iip, newLength,
@@ -226,7 +228,8 @@ final class FSDirTruncateOp {
 
     boolean shouldCopyOnTruncate = shouldCopyOnTruncate(fsn, file, oldBlock);
     if (newBlock == null) {
-      newBlock = (shouldCopyOnTruncate) ? fsn.createNewBlock(false)
+      newBlock = (shouldCopyOnTruncate) ?
+          fsn.createNewBlock(BlockType.CONTIGUOUS)
           : new Block(oldBlock.getBlockId(), oldBlock.getNumBytes(),
           fsn.nextGenerationStamp(fsn.getBlockManager().isLegacyBlock(
               oldBlock)));

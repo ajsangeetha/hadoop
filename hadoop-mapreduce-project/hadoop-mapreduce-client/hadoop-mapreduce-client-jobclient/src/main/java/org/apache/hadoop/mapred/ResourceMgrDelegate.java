@@ -476,19 +476,19 @@ public class ResourceMgrDelegate extends YarnClient {
     return client.listReservations(request);
   }
   @Override
-  public Map<NodeId, Set<NodeLabel>> getNodeToLabels() throws YarnException,
+  public Map<NodeId, Set<String>> getNodeToLabels() throws YarnException,
       IOException {
     return client.getNodeToLabels();
   }
 
   @Override
-  public Map<NodeLabel, Set<NodeId>> getLabelsToNodes() throws YarnException,
+  public Map<String, Set<NodeId>> getLabelsToNodes() throws YarnException,
       IOException {
     return client.getLabelsToNodes();
   }
 
   @Override
-  public Map<NodeLabel, Set<NodeId>> getLabelsToNodes(Set<String> labels)
+  public Map<String, Set<NodeId>> getLabelsToNodes(Set<String> labels)
       throws YarnException, IOException {
     return client.getLabelsToNodes(labels);
   }
@@ -510,5 +510,11 @@ public class ResourceMgrDelegate extends YarnClient {
       SignalContainerCommand command)
       throws YarnException, IOException {
     client.signalToContainer(containerId, command);
+  }
+
+  @Override
+  public void killApplication(ApplicationId appId, String diagnostics)
+      throws YarnException, IOException {
+    client.killApplication(appId, diagnostics);
   }
 }

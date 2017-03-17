@@ -18,6 +18,7 @@
 package org.apache.hadoop.hdfs.server.namenode.metrics;
 
 import org.apache.hadoop.crypto.key.JavaKeyStoreProvider;
+import org.apache.hadoop.fs.CommonConfigurationKeysPublic;
 import org.apache.hadoop.fs.FileSystemTestHelper;
 import org.apache.hadoop.fs.FileSystemTestWrapper;
 import org.apache.hadoop.fs.permission.FsPermission;
@@ -77,7 +78,7 @@ import org.junit.Test;
  */
 public class TestNameNodeMetrics {
   private static final Configuration CONF = new HdfsConfiguration();
-  private static final int DFS_REPLICATION_INTERVAL = 1;
+  private static final int DFS_REDUNDANCY_INTERVAL = 1;
   private static final Path TEST_ROOT_DIR_PATH = 
     new Path("/testNameNodeMetrics");
   private static final String NN_METRICS = "NameNodeActivity";
@@ -95,9 +96,9 @@ public class TestNameNodeMetrics {
     CONF.setLong(DFSConfigKeys.DFS_BLOCK_SIZE_KEY, 100);
     CONF.setInt(DFSConfigKeys.DFS_BYTES_PER_CHECKSUM_KEY, 1);
     CONF.setLong(DFSConfigKeys.DFS_HEARTBEAT_INTERVAL_KEY,
-        DFS_REPLICATION_INTERVAL);
-    CONF.setInt(DFSConfigKeys.DFS_NAMENODE_REPLICATION_INTERVAL_KEY, 
-        DFS_REPLICATION_INTERVAL);
+        DFS_REDUNDANCY_INTERVAL);
+    CONF.setInt(DFSConfigKeys.DFS_NAMENODE_REDUNDANCY_INTERVAL_SECONDS_KEY,
+        DFS_REDUNDANCY_INTERVAL);
     CONF.set(DFSConfigKeys.DFS_METRICS_PERCENTILES_INTERVALS_KEY, 
         "" + PERCENTILES_INTERVAL);
     // Enable stale DataNodes checking
@@ -166,7 +167,9 @@ public class TestNameNodeMetrics {
         MetricsAsserts.getLongGauge("CapacityRemaining", rb);
     long capacityUsedNonDFS =
         MetricsAsserts.getLongGauge("CapacityUsedNonDFS", rb);
-    assert(capacityUsed + capacityRemaining + capacityUsedNonDFS ==
+    // There will be 5% space reserved in ext filesystem which is not
+    // considered.
+    assert (capacityUsed + capacityRemaining + capacityUsedNonDFS <=
         capacityTotal);
   }
 
@@ -330,7 +333,7 @@ public class TestNameNodeMetrics {
   private void waitForDeletion() throws InterruptedException {
     // Wait for more than DATANODE_COUNT replication intervals to ensure all
     // the blocks pending deletion are sent for deletion to the datanodes.
-    Thread.sleep(DFS_REPLICATION_INTERVAL * (DATANODE_COUNT + 1) * 1000);
+    Thread.sleep(DFS_REDUNDANCY_INTERVAL * (DATANODE_COUNT + 1) * 1000);
   }
 
   /**
@@ -361,7 +364,7 @@ public class TestNameNodeMetrics {
     rb = getMetrics(source);
     gauge = MetricsAsserts.getLongGauge(name, rb);
     while (gauge != expected && (--retries > 0)) {
-      Thread.sleep(DFS_REPLICATION_INTERVAL * 500);
+      Thread.sleep(DFS_REDUNDANCY_INTERVAL * 500);
       rb = getMetrics(source);
       gauge = MetricsAsserts.getLongGauge(name, rb);
     }
@@ -568,7 +571,7 @@ public class TestNameNodeMetrics {
     Path file1_Path = new Path(TEST_ROOT_DIR_PATH, "ReadData.dat");
 
     //Perform create file operation
-    createFile(file1_Path, 1024 * 1024,(short)2);
+    createFile(file1_Path, 1024, (short) 2);
 
     // Perform read file operation on earlier created file
     readFile(fs, file1_Path);
@@ -640,7 +643,7 @@ public class TestNameNodeMetrics {
     // Set up java key store
     String testRoot = fsHelper.getTestRootDir();
     File testRootDir = new File(testRoot).getAbsoluteFile();
-    conf.set(DFSConfigKeys.DFS_ENCRYPTION_KEY_PROVIDER_URI,
+    conf.set(CommonConfigurationKeysPublic.HADOOP_SECURITY_KEY_PROVIDER_PATH,
         JavaKeyStoreProvider.SCHEME_NAME + "://file" +
         new Path(testRootDir.toString(), "test.jks").toUri());
     conf.setBoolean(DFSConfigKeys

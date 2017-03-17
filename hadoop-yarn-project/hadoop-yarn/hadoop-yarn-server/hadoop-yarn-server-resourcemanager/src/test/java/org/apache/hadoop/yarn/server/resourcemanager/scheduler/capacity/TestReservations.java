@@ -22,6 +22,8 @@ import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.Matchers.any;
+import static org.mockito.Mockito.doNothing;
+import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.when;
@@ -30,6 +32,7 @@ import java.util.Collections;
 import java.util.HashMap;
 import java.util.Map;
 
+import com.google.common.collect.ImmutableMap;
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.yarn.api.records.ApplicationAttemptId;
@@ -57,8 +60,9 @@ import org.apache.hadoop.yarn.server.resourcemanager.scheduler.ResourceLimits;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.ResourceUsage;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.SchedulerApplicationAttempt.AMState;
 
-import org.apache.hadoop.yarn.server.resourcemanager.scheduler.SchedulerRequestKey;
+import org.apache.hadoop.yarn.server.scheduler.SchedulerRequestKey;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.capacity.preemption.PreemptionManager;
+import org.apache.hadoop.yarn.server.resourcemanager.scheduler.common.ResourceCommitRequest;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.common.fica.FiCaSchedulerApp;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.common.fica.FiCaSchedulerNode;
 import org.apache.hadoop.yarn.server.resourcemanager.security.RMContainerTokenSecretManager;
@@ -112,7 +116,7 @@ public class TestReservations {
   private void setup(CapacitySchedulerConfiguration csConf,
       boolean addUserLimits) throws Exception {
 
-    csConf.setBoolean("yarn.scheduler.capacity.user-metrics.enable", true);
+    csConf.setBoolean(CapacitySchedulerConfiguration.ENABLE_USER_METRICS, true);
     final String newRoot = "root" + System.currentTimeMillis();
     // final String newRoot = "root";
 
@@ -129,8 +133,6 @@ public class TestReservations {
         Resources.createResource(16 * GB, 12));
     when(csContext.getClusterResource()).thenReturn(
         Resources.createResource(100 * 16 * GB, 100 * 12));
-    when(csContext.getNonPartitionedQueueComparator()).thenReturn(
-        CapacityScheduler.nonPartitionedQueueComparator);
     when(csContext.getResourceCalculator()).thenReturn(resourceCalculator);
     when(csContext.getPreemptionManager()).thenReturn(new PreemptionManager());
     when(csContext.getRMContext()).thenReturn(rmContext);
@@ -140,7 +142,7 @@ public class TestReservations {
     when(csContext.getContainerTokenSecretManager()).thenReturn(
         containerTokenSecretManager);
 
-    root = CapacityScheduler.parseQueue(csContext, csConf, null,
+    root = CapacitySchedulerQueueManager.parseQueue(csContext, csConf, null,
         CapacitySchedulerConfiguration.ROOT, queues, queues, TestUtils.spyHook);
 
     ResourceUsage queueResUsage = root.getQueueResourceUsage();
@@ -190,6 +192,15 @@ public class TestReservations {
   }
 
   static LeafQueue stubLeafQueue(LeafQueue queue) {
+    ParentQueue parent = (ParentQueue) queue.getParent();
+
+    if (parent != null) {
+      // Stub out parent queue's accept and apply.
+      doReturn(true).when(parent).accept(any(Resource.class),
+          any(ResourceCommitRequest.class));
+      doNothing().when(parent).apply(any(Resource.class),
+          any(ResourceCommitRequest.class));
+    }
     return queue;
   }
 
@@ -239,6 +250,12 @@ public class TestReservations {
     FiCaSchedulerNode node_2 = TestUtils.getMockNode(host_2, DEFAULT_RACK, 0,
         8 * GB);
 
+    Map<ApplicationAttemptId, FiCaSchedulerApp> apps = ImmutableMap.of(
+        app_0.getApplicationAttemptId(), app_0, app_1.getApplicationAttemptId(),
+        app_1);
+    Map<NodeId, FiCaSchedulerNode> nodes = ImmutableMap.of(node_0.getNodeID(),
+        node_0, node_1.getNodeID(), node_1, node_2.getNodeID(), node_2);
+
     when(csContext.getNode(node_0.getNodeID())).thenReturn(node_0);
     when(csContext.getNode(node_1.getNodeID())).thenReturn(node_1);
     when(csContext.getNode(node_2.getNodeID())).thenReturn(node_2);
@@ -268,8 +285,10 @@ public class TestReservations {
 
     // Start testing...
     // Only AM
-    a.assignContainers(clusterResource, node_0,
-        new ResourceLimits(clusterResource), SchedulingMode.RESPECT_PARTITION_EXCLUSIVITY);
+    TestUtils.applyResourceCommitRequest(clusterResource,
+        a.assignContainers(clusterResource, node_0,
+            new ResourceLimits(clusterResource),
+            SchedulingMode.RESPECT_PARTITION_EXCLUSIVITY), nodes, apps);
     assertEquals(2 * GB, a.getUsedResources().getMemorySize());
     assertEquals(2 * GB, app_0.getCurrentConsumption().getMemorySize());
     assertEquals(0 * GB, a.getMetrics().getReservedMB());
@@ -280,8 +299,10 @@ public class TestReservations {
     assertEquals(0 * GB, node_2.getAllocatedResource().getMemorySize());
 
     // Only 1 map - simulating reduce
-    a.assignContainers(clusterResource, node_0,
-        new ResourceLimits(clusterResource), SchedulingMode.RESPECT_PARTITION_EXCLUSIVITY);
+    TestUtils.applyResourceCommitRequest(clusterResource,
+        a.assignContainers(clusterResource, node_0,
+            new ResourceLimits(clusterResource),
+            SchedulingMode.RESPECT_PARTITION_EXCLUSIVITY), nodes, apps);
     assertEquals(5 * GB, a.getUsedResources().getMemorySize());
     assertEquals(5 * GB, app_0.getCurrentConsumption().getMemorySize());
     assertEquals(0 * GB, a.getMetrics().getReservedMB());
@@ -292,8 +313,10 @@ public class TestReservations {
     assertEquals(0 * GB, node_2.getAllocatedResource().getMemorySize());
 
     // Only 1 map to other node - simulating reduce
-    a.assignContainers(clusterResource, node_1,
-        new ResourceLimits(clusterResource), SchedulingMode.RESPECT_PARTITION_EXCLUSIVITY);
+    TestUtils.applyResourceCommitRequest(clusterResource,
+        a.assignContainers(clusterResource, node_1,
+            new ResourceLimits(clusterResource),
+            SchedulingMode.RESPECT_PARTITION_EXCLUSIVITY), nodes, apps);
     assertEquals(8 * GB, a.getUsedResources().getMemorySize());
     assertEquals(8 * GB, app_0.getCurrentConsumption().getMemorySize());
     assertEquals(0 * GB, a.getMetrics().getReservedMB());
@@ -304,12 +327,14 @@ public class TestReservations {
     assertEquals(5 * GB, node_0.getAllocatedResource().getMemorySize());
     assertEquals(3 * GB, node_1.getAllocatedResource().getMemorySize());
     assertEquals(0 * GB, node_2.getAllocatedResource().getMemorySize());
-    assertEquals(2, app_0.getTotalRequiredResources(
+    assertEquals(2, app_0.getOutstandingAsksCount(
         toSchedulerKey(priorityReduce)));
 
     // try to assign reducer (5G on node 0 and should reserve)
-    a.assignContainers(clusterResource, node_0,
-        new ResourceLimits(clusterResource), SchedulingMode.RESPECT_PARTITION_EXCLUSIVITY);
+    TestUtils.applyResourceCommitRequest(clusterResource,
+        a.assignContainers(clusterResource, node_0,
+            new ResourceLimits(clusterResource),
+            SchedulingMode.RESPECT_PARTITION_EXCLUSIVITY), nodes, apps);
     assertEquals(13 * GB, a.getUsedResources().getMemorySize());
     assertEquals(8 * GB, app_0.getCurrentConsumption().getMemorySize());
     assertEquals(5 * GB, a.getMetrics().getReservedMB());
@@ -321,12 +346,14 @@ public class TestReservations {
     assertEquals(5 * GB, node_0.getAllocatedResource().getMemorySize());
     assertEquals(3 * GB, node_1.getAllocatedResource().getMemorySize());
     assertEquals(0 * GB, node_2.getAllocatedResource().getMemorySize());
-    assertEquals(2, app_0.getTotalRequiredResources(
+    assertEquals(2, app_0.getOutstandingAsksCount(
         toSchedulerKey(priorityReduce)));
 
     // assign reducer to node 2
-    a.assignContainers(clusterResource, node_2,
-        new ResourceLimits(clusterResource), SchedulingMode.RESPECT_PARTITION_EXCLUSIVITY);
+    TestUtils.applyResourceCommitRequest(clusterResource,
+        a.assignContainers(clusterResource, node_2,
+            new ResourceLimits(clusterResource),
+            SchedulingMode.RESPECT_PARTITION_EXCLUSIVITY), nodes, apps);
     assertEquals(18 * GB, a.getUsedResources().getMemorySize());
     assertEquals(13 * GB, app_0.getCurrentConsumption().getMemorySize());
     assertEquals(5 * GB, a.getMetrics().getReservedMB());
@@ -338,13 +365,15 @@ public class TestReservations {
     assertEquals(5 * GB, node_0.getAllocatedResource().getMemorySize());
     assertEquals(3 * GB, node_1.getAllocatedResource().getMemorySize());
     assertEquals(5 * GB, node_2.getAllocatedResource().getMemorySize());
-    assertEquals(1, app_0.getTotalRequiredResources(
+    assertEquals(1, app_0.getOutstandingAsksCount(
         toSchedulerKey(priorityReduce)));
 
     // node_1 heartbeat and unreserves from node_0 in order to allocate
     // on node_1
-    a.assignContainers(clusterResource, node_1,
-        new ResourceLimits(clusterResource), SchedulingMode.RESPECT_PARTITION_EXCLUSIVITY);
+    TestUtils.applyResourceCommitRequest(clusterResource,
+        a.assignContainers(clusterResource, node_1,
+            new ResourceLimits(clusterResource),
+            SchedulingMode.RESPECT_PARTITION_EXCLUSIVITY), nodes, apps);
     assertEquals(18 * GB, a.getUsedResources().getMemorySize());
     assertEquals(18 * GB, app_0.getCurrentConsumption().getMemorySize());
     assertEquals(0 * GB, a.getMetrics().getReservedMB());
@@ -355,7 +384,7 @@ public class TestReservations {
     assertEquals(5 * GB, node_0.getAllocatedResource().getMemorySize());
     assertEquals(8 * GB, node_1.getAllocatedResource().getMemorySize());
     assertEquals(5 * GB, node_2.getAllocatedResource().getMemorySize());
-    assertEquals(0, app_0.getTotalRequiredResources(
+    assertEquals(0, app_0.getOutstandingAsksCount(
         toSchedulerKey(priorityReduce)));
   }
 
@@ -412,6 +441,12 @@ public class TestReservations {
     when(csContext.getNode(node_1.getNodeID())).thenReturn(node_1);
     when(csContext.getNode(node_2.getNodeID())).thenReturn(node_2);
 
+    Map<ApplicationAttemptId, FiCaSchedulerApp> apps = ImmutableMap.of(
+        app_0.getApplicationAttemptId(), app_0, app_1.getApplicationAttemptId(),
+        app_1);
+    Map<NodeId, FiCaSchedulerNode> nodes = ImmutableMap.of(node_0.getNodeID(),
+        node_0, node_1.getNodeID(), node_1, node_2.getNodeID(), node_2);
+
     cs.getNodeTracker().addNode(node_0);
     cs.getNodeTracker().addNode(node_1);
     cs.getNodeTracker().addNode(node_2);
@@ -434,8 +469,10 @@ public class TestReservations {
 
     // Start testing...
     // Only AM
-    a.assignContainers(clusterResource, node_0,
-        new ResourceLimits(clusterResource), SchedulingMode.RESPECT_PARTITION_EXCLUSIVITY);
+    TestUtils.applyResourceCommitRequest(clusterResource,
+        a.assignContainers(clusterResource, node_0,
+            new ResourceLimits(clusterResource),
+            SchedulingMode.RESPECT_PARTITION_EXCLUSIVITY), nodes, apps);
     assertEquals(2 * GB, a.getUsedResources().getMemorySize());
     assertEquals(2 * GB, app_0.getCurrentConsumption().getMemorySize());
     assertEquals(0 * GB, app_1.getCurrentConsumption().getMemorySize());
@@ -446,8 +483,10 @@ public class TestReservations {
     assertEquals(0 * GB, node_1.getAllocatedResource().getMemorySize());
     assertEquals(0 * GB, node_2.getAllocatedResource().getMemorySize());
 
-    a.assignContainers(clusterResource, node_1,
-        new ResourceLimits(clusterResource), SchedulingMode.RESPECT_PARTITION_EXCLUSIVITY);
+    TestUtils.applyResourceCommitRequest(clusterResource,
+        a.assignContainers(clusterResource, node_1,
+            new ResourceLimits(clusterResource),
+            SchedulingMode.RESPECT_PARTITION_EXCLUSIVITY), nodes, apps);
     assertEquals(4 * GB, a.getUsedResources().getMemorySize());
     assertEquals(2 * GB, app_0.getCurrentConsumption().getMemorySize());
     assertEquals(2 * GB, app_1.getCurrentConsumption().getMemorySize());
@@ -467,8 +506,10 @@ public class TestReservations {
             priorityMap, recordFactory)));
 
     // add a reservation for app_0
-    a.assignContainers(clusterResource, node_0,
-        new ResourceLimits(clusterResource), SchedulingMode.RESPECT_PARTITION_EXCLUSIVITY);
+    TestUtils.applyResourceCommitRequest(clusterResource,
+        a.assignContainers(clusterResource, node_0,
+            new ResourceLimits(clusterResource),
+            SchedulingMode.RESPECT_PARTITION_EXCLUSIVITY), nodes, apps);
     assertEquals(12 * GB, a.getUsedResources().getMemorySize());
     assertEquals(2 * GB, app_0.getCurrentConsumption().getMemorySize());
     assertEquals(2 * GB, app_1.getCurrentConsumption().getMemorySize());
@@ -481,8 +522,10 @@ public class TestReservations {
 
     // next assignment is beyond user limit for user_0 but it should assign to
     // app_1 for user_1
-    a.assignContainers(clusterResource, node_1,
-        new ResourceLimits(clusterResource), SchedulingMode.RESPECT_PARTITION_EXCLUSIVITY);
+    TestUtils.applyResourceCommitRequest(clusterResource,
+        a.assignContainers(clusterResource, node_1,
+            new ResourceLimits(clusterResource),
+            SchedulingMode.RESPECT_PARTITION_EXCLUSIVITY), nodes, apps);
     assertEquals(14 * GB, a.getUsedResources().getMemorySize());
     assertEquals(2 * GB, app_0.getCurrentConsumption().getMemorySize());
     assertEquals(4 * GB, app_1.getCurrentConsumption().getMemorySize());
@@ -502,8 +545,8 @@ public class TestReservations {
     queues = new HashMap<String, CSQueue>();
     // test that the deadlock occurs when turned off
     CapacitySchedulerConfiguration csConf = new CapacitySchedulerConfiguration();
-    csConf.setBoolean(
-        "yarn.scheduler.capacity.reservations-continue-look-all-nodes", false);
+    csConf.setBoolean(CapacitySchedulerConfiguration.RESERVE_CONT_LOOK_ALL_NODES,
+        false);
     setup(csConf);
 
     // Manipulate queue 'a'
@@ -544,6 +587,12 @@ public class TestReservations {
     FiCaSchedulerNode node_2 = TestUtils.getMockNode(host_2, DEFAULT_RACK, 0,
         8 * GB);
 
+    Map<ApplicationAttemptId, FiCaSchedulerApp> apps = ImmutableMap.of(
+        app_0.getApplicationAttemptId(), app_0, app_1.getApplicationAttemptId(),
+        app_1);
+    Map<NodeId, FiCaSchedulerNode> nodes = ImmutableMap.of(node_0.getNodeID(),
+        node_0, node_1.getNodeID(), node_1, node_2.getNodeID(), node_2);
+
     when(csContext.getNode(node_0.getNodeID())).thenReturn(node_0);
     when(csContext.getNode(node_1.getNodeID())).thenReturn(node_1);
     when(csContext.getNode(node_2.getNodeID())).thenReturn(node_2);
@@ -569,8 +618,10 @@ public class TestReservations {
 
     // Start testing...
     // Only AM
-    a.assignContainers(clusterResource, node_0,
-        new ResourceLimits(clusterResource), SchedulingMode.RESPECT_PARTITION_EXCLUSIVITY);
+    TestUtils.applyResourceCommitRequest(clusterResource,
+        a.assignContainers(clusterResource, node_0,
+            new ResourceLimits(clusterResource),
+            SchedulingMode.RESPECT_PARTITION_EXCLUSIVITY), nodes, apps);
     assertEquals(2 * GB, a.getUsedResources().getMemorySize());
     assertEquals(2 * GB, app_0.getCurrentConsumption().getMemorySize());
     assertEquals(0 * GB, a.getMetrics().getReservedMB());
@@ -581,8 +632,10 @@ public class TestReservations {
     assertEquals(0 * GB, node_2.getAllocatedResource().getMemorySize());
 
     // Only 1 map - simulating reduce
-    a.assignContainers(clusterResource, node_0,
-        new ResourceLimits(clusterResource), SchedulingMode.RESPECT_PARTITION_EXCLUSIVITY);
+    TestUtils.applyResourceCommitRequest(clusterResource,
+        a.assignContainers(clusterResource, node_0,
+            new ResourceLimits(clusterResource),
+            SchedulingMode.RESPECT_PARTITION_EXCLUSIVITY), nodes, apps);
     assertEquals(5 * GB, a.getUsedResources().getMemorySize());
     assertEquals(5 * GB, app_0.getCurrentConsumption().getMemorySize());
     assertEquals(0 * GB, a.getMetrics().getReservedMB());
@@ -593,8 +646,10 @@ public class TestReservations {
     assertEquals(0 * GB, node_2.getAllocatedResource().getMemorySize());
 
     // Only 1 map to other node - simulating reduce
-    a.assignContainers(clusterResource, node_1,
-        new ResourceLimits(clusterResource), SchedulingMode.RESPECT_PARTITION_EXCLUSIVITY);
+    TestUtils.applyResourceCommitRequest(clusterResource,
+        a.assignContainers(clusterResource, node_1,
+            new ResourceLimits(clusterResource),
+            SchedulingMode.RESPECT_PARTITION_EXCLUSIVITY), nodes, apps);
     assertEquals(8 * GB, a.getUsedResources().getMemorySize());
     assertEquals(8 * GB, app_0.getCurrentConsumption().getMemorySize());
     assertEquals(0 * GB, a.getMetrics().getReservedMB());
@@ -605,12 +660,14 @@ public class TestReservations {
     assertEquals(5 * GB, node_0.getAllocatedResource().getMemorySize());
     assertEquals(3 * GB, node_1.getAllocatedResource().getMemorySize());
     assertEquals(0 * GB, node_2.getAllocatedResource().getMemorySize());
-    assertEquals(2, app_0.getTotalRequiredResources(
+    assertEquals(2, app_0.getOutstandingAsksCount(
         toSchedulerKey(priorityReduce)));
 
     // try to assign reducer (5G on node 0 and should reserve)
-    a.assignContainers(clusterResource, node_0,
-        new ResourceLimits(clusterResource), SchedulingMode.RESPECT_PARTITION_EXCLUSIVITY);
+    TestUtils.applyResourceCommitRequest(clusterResource,
+        a.assignContainers(clusterResource, node_0,
+            new ResourceLimits(clusterResource),
+            SchedulingMode.RESPECT_PARTITION_EXCLUSIVITY), nodes, apps);
     assertEquals(13 * GB, a.getUsedResources().getMemorySize());
     assertEquals(8 * GB, app_0.getCurrentConsumption().getMemorySize());
     assertEquals(5 * GB, a.getMetrics().getReservedMB());
@@ -622,12 +679,14 @@ public class TestReservations {
     assertEquals(5 * GB, node_0.getAllocatedResource().getMemorySize());
     assertEquals(3 * GB, node_1.getAllocatedResource().getMemorySize());
     assertEquals(0 * GB, node_2.getAllocatedResource().getMemorySize());
-    assertEquals(2, app_0.getTotalRequiredResources(
+    assertEquals(2, app_0.getOutstandingAsksCount(
         toSchedulerKey(priorityReduce)));
 
     // assign reducer to node 2
-    a.assignContainers(clusterResource, node_2,
-        new ResourceLimits(clusterResource), SchedulingMode.RESPECT_PARTITION_EXCLUSIVITY);
+    TestUtils.applyResourceCommitRequest(clusterResource,
+        a.assignContainers(clusterResource, node_2,
+            new ResourceLimits(clusterResource),
+            SchedulingMode.RESPECT_PARTITION_EXCLUSIVITY), nodes, apps);
     assertEquals(18 * GB, a.getUsedResources().getMemorySize());
     assertEquals(13 * GB, app_0.getCurrentConsumption().getMemorySize());
     assertEquals(5 * GB, a.getMetrics().getReservedMB());
@@ -639,13 +698,15 @@ public class TestReservations {
     assertEquals(5 * GB, node_0.getAllocatedResource().getMemorySize());
     assertEquals(3 * GB, node_1.getAllocatedResource().getMemorySize());
     assertEquals(5 * GB, node_2.getAllocatedResource().getMemorySize());
-    assertEquals(1, app_0.getTotalRequiredResources(
+    assertEquals(1, app_0.getOutstandingAsksCount(
         toSchedulerKey(priorityReduce)));
 
     // node_1 heartbeat and won't unreserve from node_0, potentially stuck
     // if AM doesn't handle
-    a.assignContainers(clusterResource, node_1,
-        new ResourceLimits(clusterResource), SchedulingMode.RESPECT_PARTITION_EXCLUSIVITY);
+    TestUtils.applyResourceCommitRequest(clusterResource,
+        a.assignContainers(clusterResource, node_1,
+            new ResourceLimits(clusterResource),
+            SchedulingMode.RESPECT_PARTITION_EXCLUSIVITY), nodes, apps);
     assertEquals(18 * GB, a.getUsedResources().getMemorySize());
     assertEquals(13 * GB, app_0.getCurrentConsumption().getMemorySize());
     assertEquals(5 * GB, a.getMetrics().getReservedMB());
@@ -657,7 +718,7 @@ public class TestReservations {
     assertEquals(5 * GB, node_0.getAllocatedResource().getMemorySize());
     assertEquals(3 * GB, node_1.getAllocatedResource().getMemorySize());
     assertEquals(5 * GB, node_2.getAllocatedResource().getMemorySize());
-    assertEquals(1, app_0.getTotalRequiredResources(
+    assertEquals(1, app_0.getOutstandingAsksCount(
         toSchedulerKey(priorityReduce)));
   }
 
@@ -706,6 +767,12 @@ public class TestReservations {
     FiCaSchedulerNode node_1 = TestUtils.getMockNode(host_1, DEFAULT_RACK, 0,
         8 * GB);
 
+    Map<ApplicationAttemptId, FiCaSchedulerApp> apps = ImmutableMap.of(
+        app_0.getApplicationAttemptId(), app_0, app_1.getApplicationAttemptId(),
+        app_1);
+    Map<NodeId, FiCaSchedulerNode> nodes = ImmutableMap.of(node_0.getNodeID(),
+        node_0, node_1.getNodeID(), node_1);
+
     cs.getNodeTracker().addNode(node_0);
     cs.getNodeTracker().addNode(node_1);
 
@@ -733,8 +800,10 @@ public class TestReservations {
 
     // Start testing...
     // Only AM
-    a.assignContainers(clusterResource, node_0,
-        new ResourceLimits(clusterResource), SchedulingMode.RESPECT_PARTITION_EXCLUSIVITY);
+    TestUtils.applyResourceCommitRequest(clusterResource,
+        a.assignContainers(clusterResource, node_0,
+            new ResourceLimits(clusterResource),
+            SchedulingMode.RESPECT_PARTITION_EXCLUSIVITY), nodes, apps);
     assertEquals(2 * GB, a.getUsedResources().getMemorySize());
     assertEquals(2 * GB, app_0.getCurrentConsumption().getMemorySize());
     assertEquals(0 * GB, a.getMetrics().getReservedMB());
@@ -744,8 +813,10 @@ public class TestReservations {
     assertEquals(0 * GB, node_1.getAllocatedResource().getMemorySize());
 
     // Only 1 map - simulating reduce
-    a.assignContainers(clusterResource, node_0,
-        new ResourceLimits(clusterResource), SchedulingMode.RESPECT_PARTITION_EXCLUSIVITY);
+    TestUtils.applyResourceCommitRequest(clusterResource,
+        a.assignContainers(clusterResource, node_0,
+            new ResourceLimits(clusterResource),
+            SchedulingMode.RESPECT_PARTITION_EXCLUSIVITY), nodes, apps);
     assertEquals(5 * GB, a.getUsedResources().getMemorySize());
     assertEquals(5 * GB, app_0.getCurrentConsumption().getMemorySize());
     assertEquals(0 * GB, a.getMetrics().getReservedMB());
@@ -755,8 +826,10 @@ public class TestReservations {
     assertEquals(0 * GB, node_1.getAllocatedResource().getMemorySize());
 
     // Only 1 map to other node - simulating reduce
-    a.assignContainers(clusterResource, node_1,
-        new ResourceLimits(clusterResource), SchedulingMode.RESPECT_PARTITION_EXCLUSIVITY);
+    TestUtils.applyResourceCommitRequest(clusterResource,
+        a.assignContainers(clusterResource, node_1,
+            new ResourceLimits(clusterResource),
+            SchedulingMode.RESPECT_PARTITION_EXCLUSIVITY), nodes, apps);
     assertEquals(8 * GB, a.getUsedResources().getMemorySize());
     assertEquals(8 * GB, app_0.getCurrentConsumption().getMemorySize());
     assertEquals(0 * GB, a.getMetrics().getReservedMB());
@@ -766,12 +839,14 @@ public class TestReservations {
     assertEquals(null, node_0.getReservedContainer());
     assertEquals(5 * GB, node_0.getAllocatedResource().getMemorySize());
     assertEquals(3 * GB, node_1.getAllocatedResource().getMemorySize());
-    assertEquals(2, app_0.getTotalRequiredResources(
+    assertEquals(2, app_0.getOutstandingAsksCount(
         toSchedulerKey(priorityReduce)));
 
     // try to assign reducer (5G on node 0 and should reserve)
-    a.assignContainers(clusterResource, node_0,
-        new ResourceLimits(clusterResource), SchedulingMode.RESPECT_PARTITION_EXCLUSIVITY);
+    TestUtils.applyResourceCommitRequest(clusterResource,
+        a.assignContainers(clusterResource, node_0,
+            new ResourceLimits(clusterResource),
+            SchedulingMode.RESPECT_PARTITION_EXCLUSIVITY), nodes, apps);
     assertEquals(13 * GB, a.getUsedResources().getMemorySize());
     assertEquals(8 * GB, app_0.getCurrentConsumption().getMemorySize());
     assertEquals(5 * GB, a.getMetrics().getReservedMB());
@@ -782,12 +857,14 @@ public class TestReservations {
         .getMemorySize());
     assertEquals(5 * GB, node_0.getAllocatedResource().getMemorySize());
     assertEquals(3 * GB, node_1.getAllocatedResource().getMemorySize());
-    assertEquals(2, app_0.getTotalRequiredResources(
+    assertEquals(2, app_0.getOutstandingAsksCount(
         toSchedulerKey(priorityReduce)));
 
     // could allocate but told need to unreserve first
-    a.assignContainers(clusterResource, node_1,
-        new ResourceLimits(clusterResource), SchedulingMode.RESPECT_PARTITION_EXCLUSIVITY);
+    TestUtils.applyResourceCommitRequest(clusterResource,
+        a.assignContainers(clusterResource, node_1,
+            new ResourceLimits(clusterResource),
+            SchedulingMode.RESPECT_PARTITION_EXCLUSIVITY), nodes, apps);
     assertEquals(13 * GB, a.getUsedResources().getMemorySize());
     assertEquals(13 * GB, app_0.getCurrentConsumption().getMemorySize());
     assertEquals(0 * GB, a.getMetrics().getReservedMB());
@@ -797,7 +874,7 @@ public class TestReservations {
     assertEquals(null, node_0.getReservedContainer());
     assertEquals(5 * GB, node_0.getAllocatedResource().getMemorySize());
     assertEquals(8 * GB, node_1.getAllocatedResource().getMemorySize());
-    assertEquals(1, app_0.getTotalRequiredResources(
+    assertEquals(1, app_0.getOutstandingAsksCount(
         toSchedulerKey(priorityReduce)));
   }
 
@@ -844,13 +921,15 @@ public class TestReservations {
     Container container = TestUtils.getMockContainer(containerId,
         node_1.getNodeID(), Resources.createResource(2*GB),
         priorityMap.getPriority());
-    RMContainer rmContainer = new RMContainerImpl(container, appAttemptId,
+    RMContainer rmContainer = new RMContainerImpl(container,
+        SchedulerRequestKey.extractFrom(container), appAttemptId,
         node_1.getNodeID(), "user", rmContext);
 
     Container container_1 = TestUtils.getMockContainer(containerId,
         node_0.getNodeID(), Resources.createResource(1*GB),
         priorityMap.getPriority());
-    RMContainer rmContainer_1 = new RMContainerImpl(container_1, appAttemptId,
+    RMContainer rmContainer_1 = new RMContainerImpl(container_1,
+        SchedulerRequestKey.extractFrom(container_1), appAttemptId,
         node_0.getNodeID(), "user", rmContext);
 
     // no reserved containers
@@ -917,7 +996,8 @@ public class TestReservations {
     Container container = TestUtils.getMockContainer(containerId,
         node_1.getNodeID(), Resources.createResource(2*GB),
         priorityMap.getPriority());
-    RMContainer rmContainer = new RMContainerImpl(container, appAttemptId,
+    RMContainer rmContainer = new RMContainerImpl(container,
+        SchedulerRequestKey.extractFrom(container), appAttemptId,
         node_1.getNodeID(), "user", rmContext);
 
     // nothing reserved
@@ -983,6 +1063,12 @@ public class TestReservations {
     when(csContext.getNode(node_1.getNodeID())).thenReturn(node_1);
     when(csContext.getNode(node_2.getNodeID())).thenReturn(node_2);
 
+    Map<ApplicationAttemptId, FiCaSchedulerApp> apps = ImmutableMap.of(
+        app_0.getApplicationAttemptId(), app_0, app_1.getApplicationAttemptId(),
+        app_1);
+    Map<NodeId, FiCaSchedulerNode> nodes = ImmutableMap.of(node_0.getNodeID(),
+        node_0, node_1.getNodeID(), node_1, node_2.getNodeID(), node_2);
+
     final int numNodes = 2;
     Resource clusterResource = Resources.createResource(numNodes * (8 * GB));
     when(csContext.getNumClusterNodes()).thenReturn(numNodes);
@@ -1004,8 +1090,10 @@ public class TestReservations {
 
     // Start testing...
     // Only AM
-    a.assignContainers(clusterResource, node_0,
-        new ResourceLimits(clusterResource), SchedulingMode.RESPECT_PARTITION_EXCLUSIVITY);
+    TestUtils.applyResourceCommitRequest(clusterResource,
+        a.assignContainers(clusterResource, node_0,
+            new ResourceLimits(clusterResource),
+            SchedulingMode.RESPECT_PARTITION_EXCLUSIVITY), nodes, apps);
     assertEquals(2 * GB, a.getUsedResources().getMemorySize());
     assertEquals(2 * GB, app_0.getCurrentConsumption().getMemorySize());
     assertEquals(0 * GB, a.getMetrics().getReservedMB());
@@ -1015,8 +1103,10 @@ public class TestReservations {
     assertEquals(0 * GB, node_1.getAllocatedResource().getMemorySize());
 
     // Only 1 map - simulating reduce
-    a.assignContainers(clusterResource, node_0,
-        new ResourceLimits(clusterResource), SchedulingMode.RESPECT_PARTITION_EXCLUSIVITY);
+    TestUtils.applyResourceCommitRequest(clusterResource,
+        a.assignContainers(clusterResource, node_0,
+            new ResourceLimits(clusterResource),
+            SchedulingMode.RESPECT_PARTITION_EXCLUSIVITY), nodes, apps);
     assertEquals(5 * GB, a.getUsedResources().getMemorySize());
     assertEquals(5 * GB, app_0.getCurrentConsumption().getMemorySize());
     assertEquals(0 * GB, a.getMetrics().getReservedMB());
@@ -1026,8 +1116,10 @@ public class TestReservations {
     assertEquals(0 * GB, node_1.getAllocatedResource().getMemorySize());
 
     // Only 1 map to other node - simulating reduce
-    a.assignContainers(clusterResource, node_1,
-        new ResourceLimits(clusterResource), SchedulingMode.RESPECT_PARTITION_EXCLUSIVITY);
+    TestUtils.applyResourceCommitRequest(clusterResource,
+        a.assignContainers(clusterResource, node_1,
+            new ResourceLimits(clusterResource),
+            SchedulingMode.RESPECT_PARTITION_EXCLUSIVITY), nodes, apps);
     assertEquals(8 * GB, a.getUsedResources().getMemorySize());
     assertEquals(8 * GB, app_0.getCurrentConsumption().getMemorySize());
     assertEquals(0 * GB, a.getMetrics().getReservedMB());
@@ -1040,8 +1132,10 @@ public class TestReservations {
     // now add in reservations and make sure it continues if config set
     // allocate to queue so that the potential new capacity is greater then
     // absoluteMaxCapacity
-    a.assignContainers(clusterResource, node_0,
-        new ResourceLimits(clusterResource), SchedulingMode.RESPECT_PARTITION_EXCLUSIVITY);
+    TestUtils.applyResourceCommitRequest(clusterResource,
+        a.assignContainers(clusterResource, node_0,
+            new ResourceLimits(clusterResource),
+            SchedulingMode.RESPECT_PARTITION_EXCLUSIVITY), nodes, apps);
     assertEquals(13 * GB, a.getUsedResources().getMemorySize());
     assertEquals(8 * GB, app_0.getCurrentConsumption().getMemorySize());
     assertEquals(5 * GB, a.getMetrics().getReservedMB());
@@ -1087,8 +1181,8 @@ public class TestReservations {
     csConf.setBoolean(
         CapacitySchedulerConfiguration.RESERVE_CONT_LOOK_ALL_NODES, false);
     Map<String, CSQueue> newQueues = new HashMap<String, CSQueue>();
-    CSQueue newRoot = CapacityScheduler.parseQueue(csContext, csConf, null,
-        CapacitySchedulerConfiguration.ROOT, newQueues, queues,
+    CSQueue newRoot = CapacitySchedulerQueueManager.parseQueue(csContext,
+        csConf, null, CapacitySchedulerConfiguration.ROOT, newQueues, queues,
         TestUtils.spyHook);
     queues = newQueues;
     root.reinitialize(newRoot, cs.getClusterResource());
@@ -1153,6 +1247,12 @@ public class TestReservations {
     FiCaSchedulerNode node_2 = TestUtils.getMockNode(host_2, DEFAULT_RACK, 0,
         8 * GB);
 
+    Map<ApplicationAttemptId, FiCaSchedulerApp> apps = ImmutableMap.of(
+        app_0.getApplicationAttemptId(), app_0, app_1.getApplicationAttemptId(),
+        app_1);
+    Map<NodeId, FiCaSchedulerNode> nodes = ImmutableMap.of(node_0.getNodeID(),
+        node_0, node_1.getNodeID(), node_1, node_2.getNodeID(), node_2);
+
     when(csContext.getNode(node_0.getNodeID())).thenReturn(node_0);
     when(csContext.getNode(node_1.getNodeID())).thenReturn(node_1);
     when(csContext.getNode(node_2.getNodeID())).thenReturn(node_2);
@@ -1178,8 +1278,10 @@ public class TestReservations {
 
     // Start testing...
     // Only AM
-    a.assignContainers(clusterResource, node_0,
-        new ResourceLimits(clusterResource), SchedulingMode.RESPECT_PARTITION_EXCLUSIVITY);
+    TestUtils.applyResourceCommitRequest(clusterResource,
+        a.assignContainers(clusterResource, node_0,
+            new ResourceLimits(clusterResource),
+            SchedulingMode.RESPECT_PARTITION_EXCLUSIVITY), nodes, apps);
     assertEquals(2 * GB, a.getUsedResources().getMemorySize());
     assertEquals(2 * GB, app_0.getCurrentConsumption().getMemorySize());
     assertEquals(0 * GB, a.getMetrics().getReservedMB());
@@ -1189,8 +1291,10 @@ public class TestReservations {
     assertEquals(0 * GB, node_1.getAllocatedResource().getMemorySize());
 
     // Only 1 map - simulating reduce
-    a.assignContainers(clusterResource, node_0,
-        new ResourceLimits(clusterResource), SchedulingMode.RESPECT_PARTITION_EXCLUSIVITY);
+    TestUtils.applyResourceCommitRequest(clusterResource,
+        a.assignContainers(clusterResource, node_0,
+            new ResourceLimits(clusterResource),
+            SchedulingMode.RESPECT_PARTITION_EXCLUSIVITY), nodes, apps);
     assertEquals(5 * GB, a.getUsedResources().getMemorySize());
     assertEquals(5 * GB, app_0.getCurrentConsumption().getMemorySize());
     assertEquals(0 * GB, a.getMetrics().getReservedMB());
@@ -1200,8 +1304,10 @@ public class TestReservations {
     assertEquals(0 * GB, node_1.getAllocatedResource().getMemorySize());
 
     // Only 1 map to other node - simulating reduce
-    a.assignContainers(clusterResource, node_1,
-        new ResourceLimits(clusterResource), SchedulingMode.RESPECT_PARTITION_EXCLUSIVITY);
+    TestUtils.applyResourceCommitRequest(clusterResource,
+        a.assignContainers(clusterResource, node_1,
+            new ResourceLimits(clusterResource),
+            SchedulingMode.RESPECT_PARTITION_EXCLUSIVITY), nodes, apps);
     assertEquals(8 * GB, a.getUsedResources().getMemorySize());
     assertEquals(8 * GB, app_0.getCurrentConsumption().getMemorySize());
     assertEquals(0 * GB, a.getMetrics().getReservedMB());
@@ -1214,8 +1320,10 @@ public class TestReservations {
     // now add in reservations and make sure it continues if config set
     // allocate to queue so that the potential new capacity is greater then
     // absoluteMaxCapacity
-    a.assignContainers(clusterResource, node_0,
-        new ResourceLimits(clusterResource), SchedulingMode.RESPECT_PARTITION_EXCLUSIVITY);
+    TestUtils.applyResourceCommitRequest(clusterResource,
+        a.assignContainers(clusterResource, node_0,
+            new ResourceLimits(clusterResource),
+            SchedulingMode.RESPECT_PARTITION_EXCLUSIVITY), nodes, apps);
     assertEquals(13 * GB, a.getUsedResources().getMemorySize());
     assertEquals(8 * GB, app_0.getCurrentConsumption().getMemorySize());
     assertEquals(5 * GB, app_0.getCurrentReservation().getMemorySize());
@@ -1301,6 +1409,12 @@ public class TestReservations {
     FiCaSchedulerNode node_2 = TestUtils.getMockNode(host_2, DEFAULT_RACK, 0,
         8 * GB);
 
+    Map<ApplicationAttemptId, FiCaSchedulerApp> apps = ImmutableMap.of(
+        app_0.getApplicationAttemptId(), app_0, app_1.getApplicationAttemptId(),
+        app_1);
+    Map<NodeId, FiCaSchedulerNode> nodes = ImmutableMap.of(node_0.getNodeID(),
+        node_0, node_1.getNodeID(), node_1, node_2.getNodeID(), node_2);
+
     when(csContext.getNode(node_0.getNodeID())).thenReturn(node_0);
     when(csContext.getNode(node_1.getNodeID())).thenReturn(node_1);
     when(csContext.getNode(node_2.getNodeID())).thenReturn(node_2);
@@ -1330,8 +1444,10 @@ public class TestReservations {
 
     // Start testing...
     // Only AM
-    a.assignContainers(clusterResource, node_0,
-        new ResourceLimits(clusterResource), SchedulingMode.RESPECT_PARTITION_EXCLUSIVITY);
+    TestUtils.applyResourceCommitRequest(clusterResource,
+        a.assignContainers(clusterResource, node_0,
+            new ResourceLimits(clusterResource),
+            SchedulingMode.RESPECT_PARTITION_EXCLUSIVITY), nodes, apps);
     assertEquals(2 * GB, a.getUsedResources().getMemorySize());
     assertEquals(2 * GB, app_0.getCurrentConsumption().getMemorySize());
     assertEquals(0 * GB, a.getMetrics().getReservedMB());
@@ -1342,8 +1458,10 @@ public class TestReservations {
     assertEquals(0 * GB, node_2.getAllocatedResource().getMemorySize());
 
     // Only 1 map - simulating reduce
-    a.assignContainers(clusterResource, node_0,
-        new ResourceLimits(clusterResource), SchedulingMode.RESPECT_PARTITION_EXCLUSIVITY);
+    TestUtils.applyResourceCommitRequest(clusterResource,
+        a.assignContainers(clusterResource, node_0,
+            new ResourceLimits(clusterResource),
+            SchedulingMode.RESPECT_PARTITION_EXCLUSIVITY), nodes, apps);
     assertEquals(5 * GB, a.getUsedResources().getMemorySize());
     assertEquals(5 * GB, app_0.getCurrentConsumption().getMemorySize());
     assertEquals(0 * GB, a.getMetrics().getReservedMB());
@@ -1354,8 +1472,10 @@ public class TestReservations {
     assertEquals(0 * GB, node_2.getAllocatedResource().getMemorySize());
 
     // Only 1 map to other node - simulating reduce
-    a.assignContainers(clusterResource, node_1,
-        new ResourceLimits(clusterResource), SchedulingMode.RESPECT_PARTITION_EXCLUSIVITY);
+    TestUtils.applyResourceCommitRequest(clusterResource,
+        a.assignContainers(clusterResource, node_1,
+            new ResourceLimits(clusterResource),
+            SchedulingMode.RESPECT_PARTITION_EXCLUSIVITY), nodes, apps);
     assertEquals(8 * GB, a.getUsedResources().getMemorySize());
     assertEquals(8 * GB, app_0.getCurrentConsumption().getMemorySize());
     assertEquals(0 * GB, a.getMetrics().getReservedMB());
@@ -1370,8 +1490,10 @@ public class TestReservations {
     // used (8G) + required (5G). It will not reserved since it has to unreserve
     // some resource. Even with continous reservation looking, we don't allow 
     // unreserve resource to reserve container.
-    a.assignContainers(clusterResource, node_0,
-        new ResourceLimits(Resources.createResource(10 * GB)), SchedulingMode.RESPECT_PARTITION_EXCLUSIVITY);
+    TestUtils.applyResourceCommitRequest(clusterResource,
+        a.assignContainers(clusterResource, node_0,
+            new ResourceLimits(Resources.createResource(10 * GB)),
+            SchedulingMode.RESPECT_PARTITION_EXCLUSIVITY), nodes, apps);
     assertEquals(8 * GB, a.getUsedResources().getMemorySize());
     assertEquals(8 * GB, app_0.getCurrentConsumption().getMemorySize());
     assertEquals(0 * GB, a.getMetrics().getReservedMB());
@@ -1386,8 +1508,10 @@ public class TestReservations {
     // try to assign reducer (5G on node 0), but tell it's resource limits <
     // used (8G) + required (5G). It will not reserved since it has to unreserve
     // some resource. Unfortunately, there's nothing to unreserve.
-    a.assignContainers(clusterResource, node_2,
-        new ResourceLimits(Resources.createResource(10 * GB)), SchedulingMode.RESPECT_PARTITION_EXCLUSIVITY);
+    TestUtils.applyResourceCommitRequest(clusterResource,
+        a.assignContainers(clusterResource, node_2,
+            new ResourceLimits(Resources.createResource(10 * GB)),
+            SchedulingMode.RESPECT_PARTITION_EXCLUSIVITY), nodes, apps);
     assertEquals(8 * GB, a.getUsedResources().getMemorySize());
     assertEquals(8 * GB, app_0.getCurrentConsumption().getMemorySize());
     assertEquals(0 * GB, a.getMetrics().getReservedMB());
@@ -1400,8 +1524,10 @@ public class TestReservations {
     assertEquals(0 * GB, node_2.getAllocatedResource().getMemorySize());
 
     // let it assign 5G to node_2
-    a.assignContainers(clusterResource, node_2,
-        new ResourceLimits(clusterResource), SchedulingMode.RESPECT_PARTITION_EXCLUSIVITY);
+    TestUtils.applyResourceCommitRequest(clusterResource,
+        a.assignContainers(clusterResource, node_2,
+            new ResourceLimits(clusterResource),
+            SchedulingMode.RESPECT_PARTITION_EXCLUSIVITY), nodes, apps);
     assertEquals(13 * GB, a.getUsedResources().getMemorySize());
     assertEquals(13 * GB, app_0.getCurrentConsumption().getMemorySize());
     assertEquals(0 * GB, a.getMetrics().getReservedMB());
@@ -1413,8 +1539,10 @@ public class TestReservations {
     assertEquals(5 * GB, node_2.getAllocatedResource().getMemorySize());
 
     // reserve 8G node_0
-    a.assignContainers(clusterResource, node_0,
-        new ResourceLimits(clusterResource), SchedulingMode.RESPECT_PARTITION_EXCLUSIVITY);
+    TestUtils.applyResourceCommitRequest(clusterResource,
+        a.assignContainers(clusterResource, node_0,
+            new ResourceLimits(clusterResource),
+            SchedulingMode.RESPECT_PARTITION_EXCLUSIVITY), nodes, apps);
     assertEquals(21 * GB, a.getUsedResources().getMemorySize());
     assertEquals(13 * GB, app_0.getCurrentConsumption().getMemorySize());
     assertEquals(8 * GB, a.getMetrics().getReservedMB());
@@ -1428,8 +1556,10 @@ public class TestReservations {
     // try to assign (8G on node 2). No room to allocate,
     // continued to try due to having reservation above,
     // but hits queue limits so can't reserve anymore.
-    a.assignContainers(clusterResource, node_2,
-        new ResourceLimits(clusterResource), SchedulingMode.RESPECT_PARTITION_EXCLUSIVITY);
+    TestUtils.applyResourceCommitRequest(clusterResource,
+        a.assignContainers(clusterResource, node_2,
+            new ResourceLimits(clusterResource),
+            SchedulingMode.RESPECT_PARTITION_EXCLUSIVITY), nodes, apps);
     assertEquals(21 * GB, a.getUsedResources().getMemorySize());
     assertEquals(13 * GB, app_0.getCurrentConsumption().getMemorySize());
     assertEquals(8 * GB, a.getMetrics().getReservedMB());

@@ -167,20 +167,6 @@
       <outputDirectory>/share/hadoop/${hadoop.component}/webapps</outputDirectory>
     </fileSet>
     <fileSet>
-      <directory>${basedir}/src/main/conf</directory>
-      <outputDirectory>/share/hadoop/${hadoop.component}/templates</outputDirectory>
-      <includes>
-        <include>*-site.xml</include>
-      </includes>
-    </fileSet>
-    <fileSet>
-      <directory>${basedir}/src/main/packages/templates/conf</directory>
-      <outputDirectory>/share/hadoop/${hadoop.component}/templates/conf</outputDirectory>
-      <includes>
-        <include>*</include>
-      </includes>
-    </fileSet>
-    <fileSet>
       <directory>${basedir}/dev-support/jdiff</directory>
       <outputDirectory>/share/hadoop/${hadoop.component}/jdiff</outputDirectory>
     </fileSet>
@@ -191,6 +177,13 @@
     <fileSet>
       <directory>${project.build.directory}/site</directory>
       <outputDirectory>/share/doc/hadoop/${hadoop.component}</outputDirectory>
+    </fileSet>
+      <fileSet>
+      <directory>hadoop-yarn/hadoop-yarn-ui/target/hadoop-yarn-ui-${project.version}</directory>
+      <outputDirectory>/share/hadoop/${hadoop.component}/webapps/rm</outputDirectory>
+      <includes>
+        <include>**/*</include>
+      </includes>
     </fileSet>
   </fileSets>
   <moduleSets>

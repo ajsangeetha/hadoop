@@ -29,6 +29,7 @@ import java.util.Map;
 import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.http.HttpServer2;
+import org.apache.hadoop.yarn.webapp.view.RobotsTextPage;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -158,7 +159,8 @@ public abstract class WebApp extends ServletModule {
   public void configureServlets() {
     setup();
 
-    serve("/", "/__stop").with(Dispatcher.class);
+    serve("/", "/__stop", RobotsTextPage.ROBOTS_TXT_PATH)
+        .with(Dispatcher.class);
 
     for (String path : this.servePathSpecs) {
       serve(path).with(Dispatcher.class);
@@ -206,6 +208,19 @@ public abstract class WebApp extends ServletModule {
     List<String> res = parseRoute(pathSpec);
     router.add(method, res.get(R_PATH), cls, action,
                res.subList(R_PARAMS, res.size()));
+  }
+
+  /**
+   * Setup of a webapp serving route without default views added to the page.
+   * @param pathSpec  the path spec in the form of /controller/action/:args etc.
+   * @param cls the controller class
+   * @param action the controller method
+   */
+  public void routeWithoutDefaultView(String pathSpec,
+                    Class<? extends Controller> cls, String action) {
+    List<String> res = parseRoute(pathSpec);
+    router.addWithoutDefaultView(HTTP.GET, res.get(R_PATH), cls, action,
+        res.subList(R_PARAMS, res.size()));
   }
 
   public void route(String pathSpec, Class<? extends Controller> cls,

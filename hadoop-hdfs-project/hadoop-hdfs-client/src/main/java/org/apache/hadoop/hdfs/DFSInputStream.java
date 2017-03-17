@@ -240,7 +240,7 @@ public class DFSInputStream extends FSInputStream
       Iterator<LocatedBlock> oldIter = locatedBlocks.getLocatedBlocks().iterator();
       Iterator<LocatedBlock> newIter = newInfo.getLocatedBlocks().iterator();
       while (oldIter.hasNext() && newIter.hasNext()) {
-        if (! oldIter.next().getBlock().equals(newIter.next().getBlock())) {
+        if (!oldIter.next().getBlock().equals(newIter.next().getBlock())) {
           throw new IOException("Blocklist for " + src + " has changed!");
         }
       }
@@ -421,33 +421,36 @@ public class DFSInputStream extends FSInputStream
       }
       else {
         // search cached blocks first
-        int targetBlockIdx = locatedBlocks.findBlock(offset);
-        if (targetBlockIdx < 0) { // block is not cached
-          targetBlockIdx = LocatedBlocks.getInsertIndex(targetBlockIdx);
-          // fetch more blocks
-          final LocatedBlocks newBlocks = dfsClient.getLocatedBlocks(src, offset);
-          assert (newBlocks != null) : "Could not find target position " + offset;
-          locatedBlocks.insertRange(targetBlockIdx, newBlocks.getLocatedBlocks());
-        }
-        blk = locatedBlocks.get(targetBlockIdx);
+        blk = fetchBlockAt(offset, 0, true);
       }
       return blk;
     }
   }
 
   /** Fetch a block from namenode and cache it */
-  protected void fetchBlockAt(long offset) throws IOException {
+  protected LocatedBlock fetchBlockAt(long offset) throws IOException {
+    return fetchBlockAt(offset, 0, false); // don't use cache
+  }
+
+  /** Fetch a block from namenode and cache it */
+  private LocatedBlock fetchBlockAt(long offset, long length, boolean useCache)
+      throws IOException {
     synchronized(infoLock) {
       int targetBlockIdx = locatedBlocks.findBlock(offset);
       if (targetBlockIdx < 0) { // block is not cached
         targetBlockIdx = LocatedBlocks.getInsertIndex(targetBlockIdx);
+        useCache = false;
       }
-      // fetch blocks
-      final LocatedBlocks newBlocks = dfsClient.getLocatedBlocks(src, offset);
-      if (newBlocks == null) {
-        throw new IOException("Could not find target position " + offset);
+      if (!useCache) { // fetch blocks
+        final LocatedBlocks newBlocks = (length == 0)
+            ? dfsClient.getLocatedBlocks(src, offset)
+            : dfsClient.getLocatedBlocks(src, offset, length);
+        if (newBlocks == null || newBlocks.locatedBlockCount() == 0) {
+          throw new EOFException("Could not find target position " + offset);
+        }
+        locatedBlocks.insertRange(targetBlockIdx, newBlocks.getLocatedBlocks());
       }
-      locatedBlocks.insertRange(targetBlockIdx, newBlocks.getLocatedBlocks());
+      return locatedBlocks.get(targetBlockIdx);
     }
   }
 
@@ -502,28 +505,15 @@ public class DFSInputStream extends FSInputStream
       assert (locatedBlocks != null) : "locatedBlocks is null";
       List<LocatedBlock> blockRange = new ArrayList<>();
       // search cached blocks first
-      int blockIdx = locatedBlocks.findBlock(offset);
-      if (blockIdx < 0) { // block is not cached
-        blockIdx = LocatedBlocks.getInsertIndex(blockIdx);
-      }
       long remaining = length;
       long curOff = offset;
       while(remaining > 0) {
-        LocatedBlock blk = null;
-        if(blockIdx < locatedBlocks.locatedBlockCount())
-          blk = locatedBlocks.get(blockIdx);
-        if (blk == null || curOff < blk.getStartOffset()) {
-          LocatedBlocks newBlocks;
-          newBlocks = dfsClient.getLocatedBlocks(src, curOff, remaining);
-          locatedBlocks.insertRange(blockIdx, newBlocks.getLocatedBlocks());
-          continue;
-        }
+        LocatedBlock blk = fetchBlockAt(curOff, remaining, true);
         assert curOff >= blk.getStartOffset() : "Block not found";
         blockRange.add(blk);
         long bytesRead = blk.getStartOffset() + blk.getBlockSize() - curOff;
         remaining -= bytesRead;
         curOff += bytesRead;
-        blockIdx++;
       }
       return blockRange;
     }
@@ -533,7 +523,8 @@ public class DFSInputStream extends FSInputStream
    * Open a DataInputStream to a DataNode so that it can be read from.
    * We get block ID and the IDs of the destinations at startup, from the namenode.
    */
-  private synchronized DatanodeInfo blockSeekTo(long target) throws IOException {
+  private synchronized DatanodeInfo blockSeekTo(long target)
+      throws IOException {
     if (target >= getFileLength()) {
       throw new IOException("Attempted to read past end of file");
     }
@@ -676,8 +667,8 @@ public class DFSInputStream extends FSInputStream
     if (oneByteBuf == null) {
       oneByteBuf = new byte[1];
     }
-    int ret = read( oneByteBuf, 0, 1 );
-    return ( ret <= 0 ) ? -1 : (oneByteBuf[0] & 0xff);
+    int ret = read(oneByteBuf, 0, 1);
+    return (ret <= 0) ? -1 : (oneByteBuf[0] & 0xff);
   }
 
   /* This is a used by regular read() and handles ChecksumExceptions.
@@ -701,7 +692,7 @@ public class DFSInputStream extends FSInputStream
       // retry as many times as seekToNewSource allows.
       try {
         return reader.readFromBlock(blockReader, len);
-      } catch ( ChecksumException ce ) {
+      } catch (ChecksumException ce) {
         DFSClient.LOG.warn("Found Checksum error for "
             + getCurrentBlock() + " from " + currentNode
             + " at " + ce.getPos());
@@ -709,7 +700,7 @@ public class DFSInputStream extends FSInputStream
         retryCurrentNode = false;
         // we want to remember which block replicas we have tried
         corruptedBlocks.addCorruptedBlock(getCurrentBlock(), currentNode);
-      } catch ( IOException e ) {
+      } catch (IOException e) {
         if (!retryCurrentNode) {
           DFSClient.LOG.warn("Exception while reading from "
               + getCurrentBlock() + " of " + src + " from "
@@ -778,7 +769,9 @@ public class DFSInputStream extends FSInputStream
             DFSClient.LOG.warn("DFS Read", e);
           }
           blockEnd = -1;
-          if (currentNode != null) { addToDeadNodes(currentNode); }
+          if (currentNode != null) {
+            addToDeadNodes(currentNode);
+          }
           if (--retries == 0) {
             throw e;
           }
@@ -962,14 +955,14 @@ public class DFSInputStream extends FSInputStream
   }
 
   protected void fetchBlockByteRange(LocatedBlock block, long start, long end,
-      byte[] buf, int offset, CorruptedBlocks corruptedBlocks)
+      ByteBuffer buf, CorruptedBlocks corruptedBlocks)
       throws IOException {
     block = refreshLocatedBlock(block);
     while (true) {
       DNAddrPair addressPair = chooseDataNode(block, null);
       try {
         actualGetFromOneDataNode(addressPair, block, start, end,
-            buf, offset, corruptedBlocks);
+            buf, corruptedBlocks);
         return;
       } catch (IOException e) {
         checkInterrupted(e); // check if the read has been interrupted
@@ -988,12 +981,10 @@ public class DFSInputStream extends FSInputStream
     return new Callable<ByteBuffer>() {
       @Override
       public ByteBuffer call() throws Exception {
-        byte[] buf = bb.array();
-        int offset = bb.position();
         try (TraceScope ignored = dfsClient.getTracer().
             newScope("hedgedRead" + hedgedReadId, parentSpanId)) {
-          actualGetFromOneDataNode(datanode, block, start, end, buf,
-              offset, corruptedBlocks);
+          actualGetFromOneDataNode(datanode, block, start, end, bb,
+              corruptedBlocks);
           return bb;
         }
       }
@@ -1007,13 +998,12 @@ public class DFSInputStream extends FSInputStream
    * @param block             the located block containing the requested data
    * @param startInBlk        the startInBlk offset of the block
    * @param endInBlk          the endInBlk offset of the block
-   * @param buf               the given byte array into which the data is read
-   * @param offset            the offset in buf
+   * @param buf               the given byte buffer into which the data is read
    * @param corruptedBlocks   map recording list of datanodes with corrupted
    *                          block replica
    */
   void actualGetFromOneDataNode(final DNAddrPair datanode, LocatedBlock block,
-      final long startInBlk, final long endInBlk, byte[] buf, int offset,
+      final long startInBlk, final long endInBlk, ByteBuffer buf,
                                 CorruptedBlocks corruptedBlocks)
       throws IOException {
     DFSClientFaultInjector.get().startFetchFromDatanode();
@@ -1031,7 +1021,22 @@ public class DFSInputStream extends FSInputStream
         DFSClientFaultInjector.get().fetchFromDatanodeException();
         reader = getBlockReader(block, startInBlk, len, datanode.addr,
             datanode.storageType, datanode.info);
-        int nread = reader.readAll(buf, offset, len);
+
+        //Behave exactly as the readAll() call
+        ByteBuffer tmp = buf.duplicate();
+        tmp.limit(tmp.position() + len);
+        tmp = tmp.slice();
+        int nread = 0;
+        int ret;
+        while (true) {
+          ret = reader.read(tmp);
+          if (ret <= 0) {
+            break;
+          }
+          nread += ret;
+        }
+        buf.position(buf.position() + nread);
+
         IOUtilsClient.updateReadStatistics(readStatistics, nread, reader);
         dfsClient.updateFileSystemReadStats(
             reader.getNetworkDistance(), nread);
@@ -1098,7 +1103,7 @@ public class DFSInputStream extends FSInputStream
    * time. We then wait on which ever read returns first.
    */
   private void hedgedFetchBlockByteRange(LocatedBlock block, long start,
-      long end, byte[] buf, int offset, CorruptedBlocks corruptedBlocks)
+      long end, ByteBuffer buf, CorruptedBlocks corruptedBlocks)
       throws IOException {
     final DfsClientConf conf = dfsClient.getConf();
     ArrayList<Future<ByteBuffer>> futures = new ArrayList<>();
@@ -1130,8 +1135,8 @@ public class DFSInputStream extends FSInputStream
               conf.getHedgedReadThresholdMillis(), TimeUnit.MILLISECONDS);
           if (future != null) {
             ByteBuffer result = future.get();
-            System.arraycopy(result.array(), result.position(), buf, offset,
-                len);
+            result.flip();
+            buf.put(result);
             return;
           }
           DFSClient.LOG.debug("Waited {}ms to read from {}; spawning hedged "
@@ -1173,8 +1178,8 @@ public class DFSInputStream extends FSInputStream
           // cancel the rest.
           cancelAll(futures);
           dfsClient.getHedgedReadMetrics().incHedgedReadWins();
-          System.arraycopy(result.array(), result.position(), buf, offset,
-              len);
+          result.flip();
+          buf.put(result);
           return;
         } catch (InterruptedException ie) {
           // Ignore and retry
@@ -1244,9 +1249,11 @@ public class DFSInputStream extends FSInputStream
      * access key from its memory since it's considered expired based on
      * the estimated expiration date.
      */
-    if (ex instanceof InvalidBlockTokenException || ex instanceof InvalidToken) {
-      DFSClient.LOG.info("Access token was invalid when connecting to "
-          + targetAddr + " : " + ex);
+    if (ex instanceof InvalidBlockTokenException ||
+        ex instanceof InvalidToken) {
+      DFSClient.LOG.debug(
+          "Access token was invalid when connecting to {}: {}",
+          targetAddr, ex);
       return true;
     }
     return false;
@@ -1272,7 +1279,8 @@ public class DFSInputStream extends FSInputStream
     try (TraceScope scope = dfsClient.
         newReaderTraceScope("DFSInputStream#byteArrayPread",
             src, position, length)) {
-      int retLen = pread(position, buffer, offset, length);
+      ByteBuffer bb = ByteBuffer.wrap(buffer, offset, length);
+      int retLen = pread(position, bb);
       if (retLen < length) {
         dfsClient.addRetLenToReaderScope(scope, retLen);
       }
@@ -1280,7 +1288,7 @@ public class DFSInputStream extends FSInputStream
     }
   }
 
-  private int pread(long position, byte[] buffer, int offset, int length)
+  private int pread(long position, ByteBuffer buffer)
       throws IOException {
     // sanity checks
     dfsClient.checkOpen();
@@ -1292,6 +1300,7 @@ public class DFSInputStream extends FSInputStream
     if ((position < 0) || (position >= filelen)) {
       return -1;
     }
+    int length = buffer.remaining();
     int realLen = length;
     if ((position + length) > filelen) {
       realLen = (int)(filelen - position);
@@ -1304,14 +1313,16 @@ public class DFSInputStream extends FSInputStream
     CorruptedBlocks corruptedBlocks = new CorruptedBlocks();
     for (LocatedBlock blk : blockRange) {
       long targetStart = position - blk.getStartOffset();
-      long bytesToRead = Math.min(remaining, blk.getBlockSize() - targetStart);
+      int bytesToRead = (int) Math.min(remaining,
+          blk.getBlockSize() - targetStart);
+      long targetEnd = targetStart + bytesToRead - 1;
       try {
         if (dfsClient.isHedgedReadsEnabled() && !blk.isStriped()) {
           hedgedFetchBlockByteRange(blk, targetStart,
-              targetStart + bytesToRead - 1, buffer, offset, corruptedBlocks);
+              targetEnd, buffer, corruptedBlocks);
         } else {
-          fetchBlockByteRange(blk, targetStart, targetStart + bytesToRead - 1,
-              buffer, offset, corruptedBlocks);
+          fetchBlockByteRange(blk, targetStart, targetEnd,
+              buffer, corruptedBlocks);
         }
       } finally {
         // Check and report if any block replicas are corrupted.
@@ -1323,7 +1334,6 @@ public class DFSInputStream extends FSInputStream
 
       remaining -= bytesToRead;
       position += bytesToRead;
-      offset += bytesToRead;
     }
     assert remaining == 0 : "Wrong number of bytes read.";
     return realLen;
@@ -1380,10 +1390,10 @@ public class DFSInputStream extends FSInputStream
 
   @Override
   public long skip(long n) throws IOException {
-    if ( n > 0 ) {
+    if (n > 0) {
       long curPos = getPos();
       long fileLen = getFileLength();
-      if( n+curPos > fileLen ) {
+      if (n+curPos > fileLen) {
         n = fileLen - curPos;
       }
       seek(curPos+n);
@@ -1457,7 +1467,8 @@ public class DFSInputStream extends FSInputStream
    * If another node could not be found, then returns false.
    */
   @Override
-  public synchronized boolean seekToNewSource(long targetPos) throws IOException {
+  public synchronized boolean seekToNewSource(long targetPos)
+      throws IOException {
     if (currentNode == null) {
       return seekToBlockSource(targetPos);
     }
@@ -1532,7 +1543,7 @@ public class DFSInputStream extends FSInputStream
    * Get statistics about the reads which this DFSInputStream has done.
    */
   public ReadStatistics getReadStatistics() {
-    return new ReadStatistics(readStatistics);
+    return readStatistics;
   }
 
   /**
