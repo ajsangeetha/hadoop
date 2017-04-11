@@ -17,6 +17,7 @@
  */
 package org.apache.hadoop.hdfs.protocolPB;
 
+import org.apache.hadoop.hdfs.server.protocol.SlowDiskReports;
 import static org.hamcrest.CoreMatchers.is;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertSame;
@@ -34,9 +35,12 @@ import org.apache.hadoop.fs.permission.AclEntryScope;
 import org.apache.hadoop.fs.permission.AclEntryType;
 import org.apache.hadoop.fs.permission.AclStatus;
 import org.apache.hadoop.fs.permission.FsAction;
+import org.apache.hadoop.fs.FsServerDefaults;
 import org.apache.hadoop.fs.StorageType;
+import org.apache.hadoop.hdfs.DFSConfigKeys;
 import org.apache.hadoop.hdfs.DFSTestUtil;
 import org.apache.hadoop.hdfs.StripedFileTestUtil;
+import org.apache.hadoop.hdfs.client.HdfsClientConfigKeys;
 import org.apache.hadoop.hdfs.protocol.Block;
 import org.apache.hadoop.hdfs.protocol.BlockType;
 import org.apache.hadoop.hdfs.protocol.DatanodeID;
@@ -792,6 +796,32 @@ public class TestPBHelper {
         slowPeersConverted2.equals(SlowPeerReports.EMPTY_REPORT));
   }
 
+  @Test
+  public void testSlowDiskInfoPBHelper() {
+    // Test with a map that has a few slow disk entries.
+    final SlowDiskReports slowDisks = SlowDiskReports.create(
+        ImmutableMap.of(
+            "disk1", ImmutableMap.of(SlowDiskReports.DiskOp.METADATA, 0.5),
+            "disk2", ImmutableMap.of(SlowDiskReports.DiskOp.READ, 1.0,
+                SlowDiskReports.DiskOp.WRITE, 1.0),
+            "disk3", ImmutableMap.of(SlowDiskReports.DiskOp.METADATA, 1.2,
+                SlowDiskReports.DiskOp.READ, 1.5,
+                SlowDiskReports.DiskOp.WRITE, 1.3)));
+    SlowDiskReports slowDisksConverted1 = PBHelper.convertSlowDiskInfo(
+        PBHelper.convertSlowDiskInfo(slowDisks));
+    assertTrue(
+        "Expected map:" + slowDisks + ", got map:" +
+            slowDisksConverted1.getSlowDisks(),
+        slowDisksConverted1.equals(slowDisks));
+
+    // Test with an empty map
+    SlowDiskReports slowDisksConverted2 = PBHelper.convertSlowDiskInfo(
+        PBHelper.convertSlowDiskInfo(SlowDiskReports.EMPTY_REPORT));
+    assertTrue(
+        "Expected empty map:" + ", got map:" + slowDisksConverted2,
+        slowDisksConverted2.equals(SlowDiskReports.EMPTY_REPORT));
+  }
+
   private void assertBlockECRecoveryInfoEquals(
       BlockECReconstructionInfo blkECRecoveryInfo1,
       BlockECReconstructionInfo blkECRecoveryInfo2) {
@@ -841,5 +871,33 @@ public class TestPBHelper {
     }
   }
 
+  /**
+   * Test case for old namenode where the namenode doesn't support returning
+   * keyProviderUri.
+   */
+  @Test
+  public void testFSServerDefaultsHelper() {
+    HdfsProtos.FsServerDefaultsProto.Builder b =
+        HdfsProtos.FsServerDefaultsProto
+        .newBuilder();
+    b.setBlockSize(DFSConfigKeys.DFS_BLOCK_SIZE_DEFAULT);
+    b.setBytesPerChecksum(DFSConfigKeys.DFS_BYTES_PER_CHECKSUM_DEFAULT);
+    b.setWritePacketSize(
+        HdfsClientConfigKeys.DFS_CLIENT_WRITE_PACKET_SIZE_DEFAULT);
+    b.setReplication(DFSConfigKeys.DFS_REPLICATION_DEFAULT);
+    b.setFileBufferSize(DFSConfigKeys.IO_FILE_BUFFER_SIZE_DEFAULT);
+    b.setEncryptDataTransfer(DFSConfigKeys.DFS_ENCRYPT_DATA_TRANSFER_DEFAULT);
+    b.setTrashInterval(DFSConfigKeys.FS_TRASH_INTERVAL_DEFAULT);
+    b.setChecksumType(HdfsProtos.ChecksumTypeProto.valueOf(
+        DataChecksum.Type.valueOf(DFSConfigKeys.DFS_CHECKSUM_TYPE_DEFAULT).id));
+    HdfsProtos.FsServerDefaultsProto proto = b.build();
+
+    Assert.assertFalse("KeyProvider uri is not supported",
+        proto.hasKeyProviderUri());
+    FsServerDefaults fsServerDefaults = PBHelperClient.convert(proto);
+    Assert.assertNotNull("FsServerDefaults is null", fsServerDefaults);
+    Assert.assertNull("KeyProviderUri should be null",
+        fsServerDefaults.getKeyProviderUri());
+  }
 
 }
